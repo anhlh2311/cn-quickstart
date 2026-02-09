@@ -1,4 +1,4 @@
-// Copyright (c) 2025, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+// Copyright (c) 2026, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 // SPDX-License-Identifier: 0BSD
 
 plugins {
@@ -28,26 +28,3 @@ tasks.register<ConfigureProfilesTask>("configureProfiles") {
     description = "Interactively configure development profiles."
 }
 
-// Task to download published Grafana dashboards for the observability stack
-tasks.register<de.undercouch.gradle.tasks.download.Download>("fetchGrafanaDashboards") {
-    val repositoryUrl = "https://digitalasset.jfrog.io/artifactory"
-    val dashboardsDir = "${System.getenv("MODULES_DIR")}/observability/conf/grafana/dashboards/Participant"
-
-    // TODO refactor to use `eachFile { f -> ... }` when we need to download multiple files
-    src("$repositoryUrl/scribe/v${VersionFiles.dotenv["SCRIBE_VERSION"]}/grafana/v11.0.0/dashboard.json")
-    dest(file("$dashboardsDir/pqs.json"))
-    overwrite(true)
-    onlyIfModified(true)
-
-    doFirst {
-        println("Downloading Grafana dashboards...")
-        file(dashboardsDir).mkdirs()
-        val (username, password) = Credentials.execFromNetRc("digitalasset.jfrog.io")
-        username(username)
-        password(password)
-    }
-
-    doLast {
-        println("Grafana dashboards downloaded to $dashboardsDir")
-    }
-}

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+# Copyright (c) 2026, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 # SPDX-License-Identifier: 0BSD
 
 # Set default goal to 'help' if no target is specified
@@ -248,7 +248,7 @@ restart-service:
 .PHONY: start
 ifeq ($(OBSERVABILITY_ENABLED),true)
 ifneq ($(SKIP_DOWNLOADS),true) # treat “true” (or any non‑empty value) as “enabled”
-start: fetch-grafana-dashboards
+start:
 endif
 endif
 start: $(FIRST_RUN_DEPENDENCY) build ## Start the application, and observability services if enabled
@@ -305,7 +305,7 @@ capture-logs: docker-available ## Monitor docker events and capture logs
 	    -f event=destroy \
 	    -f event=health_status \
 	    -f event=oom \
-	    --format '{{.ID}} {{.Time}} {{.Actor.Attributes.name}} {{.Status}}' | \
+	    --format '{{.Actor.ID}} {{.Time}} {{.Actor.Attributes.name}} {{.Action}}' | \
 	while read -r cid time service_name status; do \
 	    network_attached=$$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$$cid" 2>/dev/null | \
 	        jq -r 'keys[] | select(. | contains ("'"$$network_name"'"))'); \
@@ -423,10 +423,6 @@ install-daml-sdk: ## Install the Daml SDK
 check-daml-sdk: ## Install the Daml SDK
 	./gradlew :daml:verifyDamlSdkVersion
 
-.PHONY: fetch-grafana-dashboards
-fetch-grafana-dashboards: ## Download Grafana dashboards
-	./gradlew fetchGrafanaDashboards
-
 .PHONY: generate-NOTICES
 generate-NOTICES: ## Generate the NOTICES.txt file
 	./gradlew generateNotices
@@ -438,13 +434,6 @@ help: ## Show this help message
 	@echo
 	@echo "Available targets:"
 	@grep -E '^(# )?[a-zA-Z_-]+:.*?## .*$$' Makefile | sed -e 's/^# //' | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
-
-.PHONY: update-env-sdk-runtime-version
-update-env-sdk-runtime-version: ## Helper to update DAML_RUNTIME_VERSION in .env based on daml/daml.yaml sdk-version
-	DAML_SDK_VERSION=$$(grep '^sdk-version:' daml/licensing/daml.yaml | awk '{print $$2}'); \
-	VERSION=$$(docker run --rm digitalasset/daml-sdk:$$DAML_SDK_VERSION bash -c 'cat /home/daml/.daml/sdk/*/sdk-config.yaml' | grep 'version:' | awk '{print $$2}'); \
-	sed -i.bak 's/^DAML_RUNTIME_VERSION=.*/DAML_RUNTIME_VERSION='"$$VERSION/" .env; \
-	echo "Updated DAML_RUNTIME_VERSION to $$VERSION"
 
 ## Conditional targets for CI/CD, only available if CI == true
 ifeq ($(CI),true)

@@ -1,3 +1,5 @@
+.. _quickstart-faq:
+
 =================================
 Canton Network App Quickstart FAQ
 =================================
@@ -60,25 +62,6 @@ This repository uses ``direnv``, ``nix``, and ``docker-compose`` to provide deve
 * how to `install direnv <https://direnv.net/docs/installation.html>`__
 * how to `install nix <https://nix.dev/install-nix.html>`__
 * how to `install docker-compose <https://docs.docker.com/compose/install/>`__
-
-**How do I authenticate on JFrog Artifactory?**
-
-To run the Quickstart App you need some binaries from Artifactory. 
-If you don't have authorization, `contact us <https://www2.digitalasset.com/contact-us-access-to-jfrog>`__ to request Artifactory access.
-
-**How do I set up my JFrog credentials?**
-
-You need to create a ``~/.netrc`` file with the following format:
-
-::
-
-   machine digitalasset.jfrog.io
-   login <your-email>
-   password <your-api-key>
-
-Set permissions with ``chmod 600 ~/.netrc``
-
-For more information see the Installation Guide.
 
 **Do I need to install Nix?**
 
@@ -186,7 +169,7 @@ A failure of this kind will end in:
 
 ::
 
-   https://digitalasset.jfrog.io/artifactory/sdk-ee/3.2.0-snapshot.20241031.13398.0.vf95d2607/daml-sdk-3.2.0-snapshot.20241031.13398.0.vf95d2607-macos-x86_64-ee.tar.gz to /Users/USER/Code/cn-quickstart/quickstart/daml/.sdk/daml-sdk-3.2.0-snapshot.20241031.13398.0.vf95d2607-macos-x86_64-ee.tar.gz
+   https://github.com/digital-asset/daml/releases/download/v3.3.0-snapshot.20241031.13398.0.vf95d2607/daml-sdk-3.2.0-snapshot.20241031.13398.0.vf95d2607-macos-x86_64-ee.tar.gz to /Users/USER/Code/cn-quickstart/quickstart/daml/.sdk/daml-sdk-3.2.0-snapshot.20241031.13398.0.vf95d2607-macos-x86_64-ee.tar.gz
 
    > Task :daml:unpackDamlSdk FAILED
 

@@ -69,8 +69,6 @@ Prerequisites
 
 Install the `CN App Quickstart <../download/cnqs-installation.html>`__ before beginning this demonstration.
 
-`Contact us <https://www.digitalasset.com/contact-us?comments=I%27m%20requesting%20access%20to%20jFrog>`__ if you need support accessing JFrog Artifactory.
-
 Walkthrough
 ===========
 
@@ -96,6 +94,8 @@ You may enable Observability, but it is not required for this demo.
 
 Build Quickstart
 ----------------
+
+.. youtube:: xsuMDLED6gI
 
 Build and start App Quickstart:
 
@@ -336,6 +336,8 @@ Congratulations. You’ve successfully created and activated a license with a pa
 Canton Console
 ==============
 
+.. youtube:: zADHja_8TSg
+
 The :externalref:`Canton Console <canton_console>` connects to the running application ledger.
 The console allows a developer to bypass the UI to interact with the CN in a more direct manner.
 For example, in Canton Console you can connect to the Participant to see the location of the Participant and their synchronizer domain.
@@ -408,6 +410,8 @@ Canton Console also provides a diagnostic tool that displays the health of Canto
 
 Daml Shell
 ==========
+
+.. youtube:: bwUyYEFCo5w
 
 The :externalref:`Daml Shell <build_daml_shell_component_howto>` connects to the running PQS database of the application provider’s Participant.
 In the Shell, the assets and their details are available in real time.
@@ -529,4 +533,4 @@ Next steps
 
 You’ve completed a business operation in the CN App Quickstart and have been introduced to the basics of the Canton Console and Daml Shell.
 We encourage you to explore the CN App Quickstart codebase and modify it to meet your business needs.
-You might be interested in learning more about the App Quickstart :ref:`quickstart-project-structure-overview` or the :ref:`quickstart-development-journey-lifecycle`.
+You might be interested in learning more about the App Quickstart :ref:`quickstart-project-structure-guide` or the :ref:`quickstart-development-journey-lifecycle`.
