@@ -59,8 +59,5 @@ services:
     volumes:
       - ./docker/backend-service/onboarding/onboarding.sh:/app/scripts/on/backend-service.sh
       - ./daml/licensing/.daml/dist/quickstart-licensing-0.0.1.dar:/canton/dars/quickstart-licensing-0.0.1.dar
-      # - ./daml/iou/.daml/dist/quickstart-iou-0.0.1.dar:/canton/dars/quickstart-iou-0.0.1.dar
-      - ./daml/dars/connexion-exchange-1.0.0.dar:/canton/dars/connexion-exchange-1.0.0.dar
-      - ./daml/dars/fungible-token-1.0.0.dar:/canton/dars/fungible-token-1.0.2.dar
       - ./integration-test/env-init.sh:/app/scripts/on/integration-tests-environment-init.sh
       - ./integration-test:/integration-test

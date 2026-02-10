@@ -34,19 +34,12 @@ tasks.register<Exec>("testDaml") {
 
 tasks.register<com.digitalasset.transcode.codegen.java.gradle.JavaCodegenTask>("codeGen") {
     dar.from("$projectDir/licensing/.daml/dist/quickstart-licensing-0.0.1.dar")
-    // dar.from("$projectDir/iou/.daml/dist/quickstart-iou-0.0.1.dar")
-    dar.from("$projectDir/dars/connexion-exchange-1.0.0.dar")
-    dar.from("$projectDir/dars/fungible-token-1.0.2.dar")
-    destination = file("$rootDir/backend/build/generated-daml-bindings")    
     dependsOn("compileDaml")
 }
 
 tasks.register<Exec>("codeGenJS") {
     dependsOn("compileDaml")
-    // commandLine("daml", "codegen", "js", "$projectDir/exchange/.daml/dist/exchange-0.0.1.dar", "-o", "$projectDir/exchange-daml-js")
-    commandLine("daml", "codegen", "js", "$projectDir/dars/connexion-exchange-1.0.0.dar", "-o", "$projectDir/connexion-exchange-daml-js")
-    commandLine("daml", "codegen", "js", "$projectDir/dars/fungible-token-1.0.2.dar", "-o", "$projectDir/fungible-token-daml-js")
-    // commandLine("daml", "codegen", "js", "$projectDir/iou/.daml/dist/quickstart-iou-0.0.1.dar", "-o", "$projectDir/iou-daml-js")
+    // commandLine("daml", "codegen", "js", "$projectDir/dars/fungible-token-1.0.2.dar", "-o", "$projectDir/fungible-token-daml-js")
     
     doLast {
         println("✅ Generated JavaScript bindings in $projectDir/exchange-daml-js")

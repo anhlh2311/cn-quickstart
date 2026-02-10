@@ -214,18 +214,6 @@ create-app-install-request: DOCKER_COMPOSE_PROFILES =
 create-app-install-request: docker-available ## Submit an App Install Request from the App User participant node
 	$(call docker-compose, run --rm container)
 
-.PHONY: create-iou
-create-iou: DOCKER_COMPOSE_FILES = -f docker/create-iou/compose.yaml
-create-iou: DOCKER_COMPOSE_PROFILES =
-create-iou: ## Create an IOU (usage: make create-iou ISSUER_USER_ID=<user_id> OWNER_USER_ID=<user_id> [CASH_AMOUNT=<amount>])
-	@if [ -z "$(ISSUER_ACCESS_TOKEN)" ] || [ -z "$(ISSUER_USER_ID)" ] || [ -z "$(OWNER_USER_ID)" ]; then \
-		echo "Error: ISSUER_ACCESS_TOKEN, ISSUER_USER_ID and OWNER_USER_ID are required parameters."; \
-		echo "Usage: make create-iou ISSUER_USER_ID=<user_id> OWNER_USER_ID=<user_id> [CASH_AMOUNT=<amount>] ISSUER_ACCESS_TOKEN=<access_token>"; \
-		echo "Example: make create-iou ISSUER_USER_ID=alice OWNER_USER_ID=bob CASH_AMOUNT=500 ISSUER_ACCESS_TOKEN=1234567890"; \
-		exit 1; \
-	fi
-	$(call docker-compose, run --rm -e ISSUER_ACCESS_TOKEN=$(ISSUER_ACCESS_TOKEN) -e ISSUER_USER_ID=$(ISSUER_USER_ID) -e OWNER_USER_ID=$(OWNER_USER_ID) -e CASH_AMOUNT=$(CASH_AMOUNT) container /app/scripts/on/create-iou.sh $(ISSUER_USER_ID) $(OWNER_USER_ID) $(CASH_AMOUNT) $(ISSUER_ACCESS_TOKEN))
-
 .PHONY: restart-backend
 restart-backend: build-backend docker-available ## Build and start the application
 	$(call docker-compose, rm -s -f backend-service)

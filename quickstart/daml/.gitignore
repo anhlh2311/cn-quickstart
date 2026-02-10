@@ -5,6 +5,8 @@ navigator.log
 
 /iou-daml-js
 /external-test-sources/splice-token-standard-test/target/
+/fungible-token-daml-js/
+/iou-daml-js/
 
 # Playwright
 node_modules/
