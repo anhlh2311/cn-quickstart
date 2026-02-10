@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(unzip:*)",
+      "Bash(bash:*)",
+      "Bash(docker compose up:*)",
+      "Bash(docker network ls:*)",
+      "Bash(find:*)"
+    ]
+  }
+}
