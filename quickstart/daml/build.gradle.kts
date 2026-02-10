@@ -38,18 +38,18 @@ tasks.register<com.digitalasset.transcode.codegen.java.gradle.JavaCodegenTask>("
     dependsOn("compileDaml")
 }
 
-tasks.register<Exec>("codeGenJS") {
-    dependsOn("compileDaml")
-    // commandLine("daml", "codegen", "js", "$projectDir/dars/fungible-token-1.0.2.dar", "-o", "$projectDir/fungible-token-daml-js")
+// tasks.register<Exec>("codeGenJS") {
+//     dependsOn("compileDaml")
+//     // commandLine("daml", "codegen", "js", "$projectDir/dars/fungible-token-1.0.2.dar", "-o", "$projectDir/fungible-token-daml-js")
     
-    doLast {
-        println("✅ Generated JavaScript bindings in $projectDir/exchange-daml-js")
-    }
-}
+//     doLast {
+//         println("✅ Generated JavaScript bindings in $projectDir/exchange-daml-js")
+//     }
+// }
 
 tasks.named("build") {
     dependsOn("codeGen")
-    dependsOn("codeGenJS")
+    // dependsOn("codeGenJS")
 }
 
 // Helper function to compute SDK variables
