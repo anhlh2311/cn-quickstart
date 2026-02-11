@@ -647,6 +647,10 @@ VALIDATOR_AUDIENCE=$BACKEND_VALIDATOR_AUDIENCE
 JWT_ACCESS_TOKEN_EXPIRES_IN=1d
 JWT_REFRESH_TOKEN_EXPIRES_IN=7d
 
+# Google Auth (disabled for local)
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+
 # Party IDs (resolved from local network)
 EXECUTOR_PARTY_ID=$APP_USER_PARTY
 LIQUIDITY_PROVIDER_PARTY_ID=$APP_PROVIDER_PARTY
@@ -659,12 +663,11 @@ LIQUIDITY_PROVIDER_FINGER_PRINT=
 LIQUIDITY_PROVIDER_PRIVATE_KEY=
 
 # Template IDs (matching uploaded DARs)
-MARKET_QUOTE_TEMPLATE_ID=#kairo-dex:Exchange.MarketQuote:MarketQuote
-SETTLEMENT_ESCROW_TEMPLATE_ID=#kairo-dex:Exchange.SettlementEscrow:SettlementEscrow
-MARKET_QUOTE_PROPOSAL_TEMPLATE_ID=#kairo-dex:Exchange.MarketQuoteProposal:MarketQuoteProposal
-FUNGIBLE_ALLOCATION_TEMPLATE_ID=#fungible-token:Fungible.TokenAllocation:TokenAllocation
-AMULET_ALLOCATION_TEMPLATE_ID=#splice-amulet:Splice.AmuletAllocation:AmuletAllocation
-LOCKED_AMULET_TEMPLATE_ID=#splice-amulet:Splice.Amulet:LockedAmulet
+MARKET_QUOTE_TEMPLATE_ID="#kairo-dex:Exchange.MarketQuote:MarketQuote"
+SETTLEMENT_ESCROW_TEMPLATE_ID="#kairo-dex:Exchange.SettlementEscrow:SettlementEscrow"
+MARKET_QUOTE_PROPOSAL_TEMPLATE_ID="#kairo-dex:Exchange.MarketQuoteProposal:MarketQuoteProposal"
+FUNGIBLE_ALLOCATION_TEMPLATE_ID="#fungible-token:Fungible.TokenAllocation:TokenAllocation"
+AMULET_ALLOCATION_TEMPLATE_ID="#splice-amulet:Splice.AmuletAllocation:AmuletAllocation"
 
 # Swagger
 SWAGGER_USERNAME=$SWAGGER_USERNAME
@@ -690,6 +693,9 @@ HOLDING_INTERFACE=$HOLDING_INTERFACE
 TRANSFER_INSTRUCTION_INTERFACE=$TRANSFER_INSTRUCTION_INTERFACE
 CBTC_TRANSFER_OFFER_TEMPLATE_ID=
 
+# DSO (resolved from local network)
+DSO=$DSO_PARTY
+
 # CBTC (placeholder - not available locally)
 CBTC_API=$CBTC_API
 CBTC_CHAIN=$CBTC_CHAIN
@@ -700,19 +706,6 @@ CBTC_NETWORK_PARTY_ID=
 PROMETHEUS_NODE_API_URL=$PROMETHEUS_NODE_API_URL
 PROMETHEUS_NODE_NAME=$PROMETHEUS_NODE_NAME
 PROMETHEUS_NODE_JOB=$PROMETHEUS_NODE_JOB
-
-# CMC
-CMC_PRO_API_KEY=
-CMC_API_URL=$CMC_API_URL
-TX_HISTORY_BATCH_SIZE=$TX_HISTORY_BATCH_SIZE
-
-# Google Auth (disabled for local)
-GOOGLE_OAUTH_CLIENT_ID=
-GOOGLE_OAUTH_CLIENT_SECRET=
-
-# Bron (disabled for local)
-BRON_API_URL=
-BRON_PRIVATE_KEY_PATH=bron-privatekey.json
 ENVEOF
 
 log "  Generated: $EXCHANGE_BACKEND_DIR/.env.local"
