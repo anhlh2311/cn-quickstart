@@ -1,0 +1,8 @@
+{
+  "networkUserId": "cbtc-network-user",
+  "partyHint": "CBTC-NETWORK",
+  "tokenId": "CBTC",
+  "displayName": "Canton BTC",
+  "symbol": "CBTC",
+  "priceSourceId": "1"
+}
