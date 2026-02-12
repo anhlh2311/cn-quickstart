@@ -1,22 +1,26 @@
 #!/bin/bash
-# Registers the CBTC token in the canton-exchange-backend.
+# Registers the CBTC token in the canton-exchange-backend using the Utility package.
 # This script:
 #   1. Generates an Ed25519 keypair (NaCl format) and stores it in cbtc-network-keypair.json
 #   2. Onboards "CBTC-NETWORK" as an external party via generate-topology + sign + allocate
 #   3. Creates a Canton user for the external party with ActAs/ReadAs rights
-#   4. Creates a TokenAllocationFactory contract on the ledger
-#   5. Creates a TokenTransferFactory contract on the ledger
-#   6. Acquires factory disclosures (createdEventBlob) for both factories
-#   7. Writes cbtc-factories.json with both factory contract IDs, template names, and template IDs
+#   4. Creates an InstrumentConfiguration contract on the ledger (utility-registry-v0)
+#   5. Creates an AllocationFactory contract on the ledger (utility-registry-app-v0)
+#      — this single contract implements AllocationFactory, TransferFactory, AND BurnMintFactory interfaces
+#   6. Acquires disclosures (createdEventBlob) for both AllocationFactory and InstrumentConfiguration
+#   7. Writes cbtc-factories.json with factory + instrument config contract IDs and disclosures
 #   8. Registers the AllocationFactory in the backend (POST /allocation-factory)
 #   9. Registers the token issuer in the backend (POST /token-issuer)
 #
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
-#   - setup-exchange.sh must have been run (DARs uploaded, contracts created)
+#   - 01-setup-exchange.sh must have been run (DARs uploaded, contracts created)
 #   - canton-exchange-backend must be running (yarn start:dev)
+#   - Utility DARs must be uploaded (included in DAR_FILES in .env)
 #
-# Usage: ./register-cbtc-token.sh
+# Usage: ./03-register-cbtc-token.sh
+#
+# Note: The previous fungible-token version is preserved as 03-register-cbtc-token-using-fungible-token.sh
 
 set -eo pipefail
 
@@ -57,6 +61,10 @@ DB_PORT="$EXCHANGE_DB_PORT"
 DB_USERNAME="$EXCHANGE_DB_USERNAME"
 DB_PASSWORD="$EXCHANGE_DB_PASSWORD"
 DB_NAME="$EXCHANGE_DB_NAME"
+
+# Template IDs for utility packages
+INSTRUMENT_CONFIG_TEMPLATE="#utility-registry-v0:Utility.Registry.V0.Configuration.Instrument:InstrumentConfiguration"
+ALLOCATION_FACTORY_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory"
 
 ##############################################################################
 # Helper Functions
@@ -157,12 +165,183 @@ generate_backend_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
+# Query active contracts by party and template
+query_active_contracts() {
+  local party="$1"
+  local template_id="$2"
+  local include_blob="${3:-false}"
+
+  local ledger_end
+  ledger_end=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
+
+  local query_body
+  query_body=$(cat <<AQEOF
+{
+  "filter":{
+    "filtersByParty":{
+      "$party":{
+        "cumulative":[{
+          "identifierFilter":{
+            "TemplateFilter":{
+              "value":{
+                "templateId":"$template_id",
+                "includeCreatedEventBlob":$include_blob
+              }
+            }
+          }
+        }]
+      }
+    }
+  },
+  "verbose":false,
+  "activeAtOffset":"$ledger_end"
+}
+AQEOF
+)
+
+  curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
+    --data-raw "$query_body"
+}
+
+# Interactive submission: prepare → sign → execute
+# Uses temp files to avoid shell variable corruption with large base64 payloads.
+# Args: $1=commands_json, $2=act_as_party, $3=private_key, $4=fingerprint, $5=command_id_prefix, $6=submission_id_prefix
+interactive_submit() {
+  local commands_json="$1"
+  local act_as_party="$2"
+  local private_key="$3"
+  local fingerprint="$4"
+  local cmd_id_prefix="$5"
+  local submission_id_prefix="$6"
+
+  local cmd_id="${cmd_id_prefix}-$(date +%s)-$RANDOM"
+  local tmp_prepare="/tmp/canton-is-prepare-$$-${RANDOM}.json"
+  local tmp_execute_body="/tmp/canton-is-exec-body-$$-${RANDOM}.json"
+  local tmp_execute_resp="/tmp/canton-is-exec-resp-$$-${RANDOM}.json"
+
+  # Ensure synchronizer ID is available
+  if [ -z "$SYNCHRONIZER_ID" ]; then
+    SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+      | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
+  fi
+
+  # Prepare — save response to file to handle large base64 preparedTransaction
+  local prepare_body
+  prepare_body=$(jq -n \
+    --argjson commands "$commands_json" \
+    --arg cmdId "$cmd_id" \
+    --arg userId "$SHARED_SECRET_USER" \
+    --arg syncId "$SYNCHRONIZER_ID" \
+    --arg party "$act_as_party" \
+    '{
+      commands: $commands,
+      commandId: $cmdId,
+      userId: $userId,
+      actAs: [$party],
+      readAs: [],
+      disclosedContracts: [],
+      synchronizerId: $syncId,
+      verboseHashing: true,
+      packageIdSelectionPreference: []
+    }')
+
+  local prepare_http
+  prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
+    "$APP_USER_JSON_API/v2/interactive-submission/prepare" \
+    -H "Authorization: Bearer $CANTON_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-raw "$prepare_body")
+
+  if [ "$prepare_http" != "200" ] && [ "$prepare_http" != "201" ]; then
+    log_error "Prepare failed with HTTP $prepare_http"
+    log_error "Response: $(head -c 500 "$tmp_prepare")"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+
+  local prepared_hash
+  prepared_hash=$(jq -r '.preparedTransactionHash // empty' "$tmp_prepare")
+  local hashing_version
+  hashing_version=$(jq -r '.hashingSchemeVersion // empty' "$tmp_prepare")
+
+  if [ -z "$prepared_hash" ]; then
+    log_error "Prepare response missing preparedTransactionHash"
+    log_error "Response: $(head -c 500 "$tmp_prepare")"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+  log "    Prepared hash: ${prepared_hash:0:30}..."
+
+  # Sign
+  log "    Signing..."
+  local sig
+  sig=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
+    const { signTransactionHash } = require('@canton-network/core-signing-lib');
+    const signature = signTransactionHash('$prepared_hash', '$private_key');
+    process.stdout.write(signature);
+  " 2>/dev/null) || sig=""
+
+  if [ -z "$sig" ]; then
+    log_error "Failed to sign prepared transaction"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+
+  # Build execute body from prepare file (avoids passing large base64 through shell vars)
+  jq -n \
+    --arg userId "$SHARED_SECRET_USER" \
+    --arg submissionId "${submission_id_prefix}-${cmd_id}" \
+    --arg preparedTx "$(jq -r '.preparedTransaction' "$tmp_prepare")" \
+    --arg hashVersion "$hashing_version" \
+    --arg party "$act_as_party" \
+    --arg sig "$sig" \
+    --arg signedBy "$fingerprint" \
+    '{
+      userId: $userId,
+      submissionId: $submissionId,
+      preparedTransaction: $preparedTx,
+      hashingSchemeVersion: $hashVersion,
+      partySignatures: {
+        signatures: [{
+          party: $party,
+          signatures: [{
+            signature: $sig,
+            signedBy: $signedBy,
+            format: "SIGNATURE_FORMAT_RAW",
+            signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"
+          }]
+        }]
+      },
+      deduplicationPeriod: {Empty: {}}
+    }' > "$tmp_execute_body"
+
+  # Execute — save response to file to preserve large JSON with event blobs
+  log "    Executing..."
+  local execute_http
+  execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
+    "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
+    -H "Authorization: Bearer $CANTON_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @"$tmp_execute_body")
+
+  if [ "$execute_http" != "200" ] && [ "$execute_http" != "201" ]; then
+    log_error "Execute failed with HTTP $execute_http"
+    log_error "Response: $(head -c 500 "$tmp_execute_resp")"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+
+  # Output the response (from file, not shell variable) and clean up
+  cat "$tmp_execute_resp"
+  rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+}
+
 ##############################################################################
 # Step 0: Pre-flight checks
 ##############################################################################
 
 log "=========================================="
-log "Register CBTC Token"
+log "Register CBTC Token (Utility Package)"
 log "=========================================="
 
 BACKEND_ENV="$EXCHANGE_BACKEND_DIR/.env"
@@ -456,47 +635,86 @@ curl_check "$APP_USER_JSON_API/v2/users/$CBTC_NETWORK_USER_ID/rights" "$CANTON_T
 log "  Rights granted"
 
 ##############################################################################
-# Step 4: Create AllocationFactory contract via interactive submission
-#         (external party requires prepare → sign → execute flow)
+# Step 4: Create InstrumentConfiguration contract via interactive submission
 ##############################################################################
 
 log ""
-log "Step 4: Creating TokenAllocationFactory contract..."
+log "Step 4: Creating InstrumentConfiguration contract..."
 
-# Query for existing AllocationFactory (use admin token since external party
-# rights were granted to admin user in Step 3)
-LEDGER_END=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
+# Query for existing InstrumentConfiguration
+INSTRUMENT_CONFIG_CID=""
+IC_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$INSTRUMENT_CONFIG_TEMPLATE" "false" 2>/dev/null) || IC_RESPONSE=""
 
-FACTORY_QUERY=$(cat <<FQEOF
-{
-  "filter":{
-    "filtersByParty":{
-      "$CBTC_NETWORK_PARTY":{
-        "cumulative":[{
-          "identifierFilter":{
-            "TemplateFilter":{
-              "value":{
-                "templateId":"#fungible-token:Fungible.TokenAllocationFactory:TokenAllocationFactory",
-                "includeCreatedEventBlob":false
-              }
-            }
-          }
-        }]
+if [ -n "$IC_RESPONSE" ]; then
+  INSTRUMENT_CONFIG_CID=$(echo "$IC_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+  ' 2>/dev/null || echo "")
+fi
+
+if [ -n "$INSTRUMENT_CONFIG_CID" ]; then
+  log "  InstrumentConfiguration already exists: ${INSTRUMENT_CONFIG_CID:0:40}..."
+else
+  log "  No existing InstrumentConfiguration found, creating via interactive submission..."
+
+  # Build CreateCommand for InstrumentConfiguration
+  IC_COMMANDS=$(jq -n \
+    --arg party "$CBTC_NETWORK_PARTY" \
+    --arg tokenId "$CBTC_TOKEN_ID" \
+    --arg templateId "$INSTRUMENT_CONFIG_TEMPLATE" \
+    '[{
+      CreateCommand: {
+        templateId: $templateId,
+        createArguments: {
+          operator: $party,
+          provider: $party,
+          registrar: $party,
+          defaultIdentifier: {
+            source: $party,
+            id: $tokenId,
+            scheme: "RegistrarInternalScheme"
+          },
+          additionalIdentifiers: [],
+          issuerRequirements: [],
+          holderRequirements: [],
+          providerAppRewardBeneficiaries: null
+        }
       }
-    }
-  },
-  "verbose":false,
-  "activeAtOffset":"$LEDGER_END"
-}
-FQEOF
-)
+    }]')
 
+  log "  Submitting interactive submission..."
+  IC_RESULT=$(interactive_submit "$IC_COMMANDS" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+    "create-instrument-config" "register-cbtc-ic") || {
+    log_error "Failed to create InstrumentConfiguration"
+    exit 1
+  }
+
+  INSTRUMENT_CONFIG_CID=$(echo "$IC_RESULT" | jq -r '
+    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("InstrumentConfiguration")) | .contractId][0] // empty
+  ' 2>/dev/null || echo "")
+
+  if [ -n "$INSTRUMENT_CONFIG_CID" ]; then
+    log "  InstrumentConfiguration created: ${INSTRUMENT_CONFIG_CID:0:40}..."
+  else
+    log_error "InstrumentConfiguration command succeeded but could not extract contract ID"
+    log "  Response: $(echo "$IC_RESULT" | jq -c '.transaction.events[:3]' 2>/dev/null | head -c 500)"
+    exit 1
+  fi
+fi
+
+##############################################################################
+# Step 5: Create AllocationFactory contract via interactive submission
+#         (implements AllocationFactory, TransferFactory, and BurnMintFactory)
+##############################################################################
+
+log ""
+log "Step 5: Creating AllocationFactory contract (utility)..."
+
+# Query for existing AllocationFactory
 ALLOCATION_FACTORY_CID=""
-FACTORY_RESPONSE=$(curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
-  --data-raw "$FACTORY_QUERY" 2>/dev/null) || FACTORY_RESPONSE=""
+AF_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$ALLOCATION_FACTORY_TEMPLATE" "false" 2>/dev/null) || AF_RESPONSE=""
 
-if [ -n "$FACTORY_RESPONSE" ]; then
-  ALLOCATION_FACTORY_CID=$(echo "$FACTORY_RESPONSE" | jq -r '
+if [ -n "$AF_RESPONSE" ]; then
+  ALLOCATION_FACTORY_CID=$(echo "$AF_RESPONSE" | jq -r '
     [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
   ' 2>/dev/null || echo "")
 fi
@@ -506,323 +724,57 @@ if [ -n "$ALLOCATION_FACTORY_CID" ]; then
 else
   log "  No existing AllocationFactory found, creating via interactive submission..."
 
-  # Get connected synchronizer for interactive submission
-  SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
-    | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
-
-  # 4a. Prepare the CreateCommand for interactive submission
-  FACTORY_CMD_ID="create-allocation-factory-$(date +%s)"
-  PREPARE_BODY=$(jq -n \
+  # Build CreateCommand for AllocationFactory
+  AF_COMMANDS=$(jq -n \
     --arg party "$CBTC_NETWORK_PARTY" \
-    --arg cmdId "$FACTORY_CMD_ID" \
-    --arg userId "$SHARED_SECRET_USER" \
-    --arg syncId "$SYNCHRONIZER_ID" \
-    '{
-      commands: [{
-        CreateCommand: {
-          templateId: "#fungible-token:Fungible.TokenAllocationFactory:TokenAllocationFactory",
-          createArguments: {
-            admin: $party,
-            meta: {values: {}}
-          }
+    --arg templateId "$ALLOCATION_FACTORY_TEMPLATE" \
+    '[{
+      CreateCommand: {
+        templateId: $templateId,
+        createArguments: {
+          provider: $party,
+          registrar: $party,
+          operator: $party
         }
-      }],
-      commandId: $cmdId,
-      userId: $userId,
-      actAs: [$party],
-      readAs: [],
-      disclosedContracts: [],
-      synchronizerId: $syncId,
-      verboseHashing: true,
-      packageIdSelectionPreference: []
-    }')
+      }
+    }]')
 
-  log "  Preparing interactive submission..."
-  PREPARE_RESULT=$(curl_check "$APP_USER_JSON_API/v2/interactive-submission/prepare" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$PREPARE_BODY") || {
-    log_error "Failed to prepare AllocationFactory command"
+  log "  Submitting interactive submission..."
+  AF_RESULT=$(interactive_submit "$AF_COMMANDS" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+    "create-alloc-factory" "register-cbtc-af") || {
+    log_error "Failed to create AllocationFactory"
     exit 1
   }
 
-  PREPARED_TX=$(echo "$PREPARE_RESULT" | jq -r '.preparedTransaction // empty')
-  PREPARED_HASH=$(echo "$PREPARE_RESULT" | jq -r '.preparedTransactionHash // empty')
-  HASHING_VERSION=$(echo "$PREPARE_RESULT" | jq -r '.hashingSchemeVersion // empty')
-
-  if [ -z "$PREPARED_TX" ] || [ -z "$PREPARED_HASH" ]; then
-    log_error "Prepare response missing required fields"
-    log_error "Response: $(echo "$PREPARE_RESULT" | head -c 500)"
-    exit 1
-  fi
-  log "  Prepared transaction hash: ${PREPARED_HASH:0:30}..."
-
-  # 4b. Sign the prepared transaction hash with the external party's private key
-  log "  Signing with external party key..."
-  FACTORY_SIGNATURE=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
-    const { signTransactionHash } = require('@canton-network/core-signing-lib');
-    const signature = signTransactionHash('$PREPARED_HASH', '$KEYPAIR_PRIV');
-    process.stdout.write(signature);
-  " 2>/dev/null) || FACTORY_SIGNATURE=""
-
-  if [ -z "$FACTORY_SIGNATURE" ]; then
-    log_error "Failed to sign prepared transaction"
-    exit 1
-  fi
-
-  # 4c. Execute the signed transaction
-  log "  Executing signed transaction..."
-  EXECUTE_BODY=$(jq -n \
-    --arg userId "$SHARED_SECRET_USER" \
-    --arg submissionId "register-cbtc-factory-$FACTORY_CMD_ID" \
-    --arg preparedTx "$PREPARED_TX" \
-    --arg hashVersion "$HASHING_VERSION" \
-    --arg party "$CBTC_NETWORK_PARTY" \
-    --arg sig "$FACTORY_SIGNATURE" \
-    --arg signedBy "$KEYPAIR_FP" \
-    '{
-      userId: $userId,
-      submissionId: $submissionId,
-      preparedTransaction: $preparedTx,
-      hashingSchemeVersion: $hashVersion,
-      partySignatures: {
-        signatures: [{
-          party: $party,
-          signatures: [{
-            signature: $sig,
-            signedBy: $signedBy,
-            format: "SIGNATURE_FORMAT_RAW",
-            signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"
-          }]
-        }]
-      },
-      deduplicationPeriod: {Empty: {}}
-    }')
-
-  FACTORY_RESULT=$(curl_check "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$EXECUTE_BODY") || {
-    log_error "Failed to execute AllocationFactory transaction"
-    exit 1
-  }
-
-  ALLOCATION_FACTORY_CID=$(echo "$FACTORY_RESULT" | jq -r '
-    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("TokenAllocationFactory")) | .contractId][0] // empty
+  ALLOCATION_FACTORY_CID=$(echo "$AF_RESULT" | jq -r '
+    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("AllocationFactory")) | .contractId][0] // empty
   ' 2>/dev/null || echo "")
 
   if [ -n "$ALLOCATION_FACTORY_CID" ]; then
     log "  AllocationFactory created: ${ALLOCATION_FACTORY_CID:0:40}..."
   else
     log_error "AllocationFactory command succeeded but could not extract contract ID"
-    log "  Response: $(echo "$FACTORY_RESULT" | head -c 500)"
+    log "  Response: $(echo "$AF_RESULT" | jq -c '.transaction.events[:3]' 2>/dev/null | head -c 500)"
     exit 1
   fi
 fi
 
 ##############################################################################
-# Step 5: Create TokenTransferFactory contract via interactive submission
+# Step 6: Acquire disclosures (with createdEventBlob) for both contracts
 ##############################################################################
 
 log ""
-log "Step 5: Creating TokenTransferFactory contract..."
+log "Step 6: Acquiring disclosures..."
 
-TRANSFER_FACTORY_TEMPLATE="#fungible-token:Fungible.TokenTransferFactory:TokenTransferFactory"
-
-# Query for existing TransferFactory
-LEDGER_END=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
-
-TFACTORY_QUERY=$(cat <<TFQEOF
-{
-  "filter":{
-    "filtersByParty":{
-      "$CBTC_NETWORK_PARTY":{
-        "cumulative":[{
-          "identifierFilter":{
-            "TemplateFilter":{
-              "value":{
-                "templateId":"$TRANSFER_FACTORY_TEMPLATE",
-                "includeCreatedEventBlob":false
-              }
-            }
-          }
-        }]
-      }
-    }
-  },
-  "verbose":false,
-  "activeAtOffset":"$LEDGER_END"
-}
-TFQEOF
-)
-
-TRANSFER_FACTORY_CID=""
-TFACTORY_RESPONSE=$(curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
-  --data-raw "$TFACTORY_QUERY" 2>/dev/null) || TFACTORY_RESPONSE=""
-
-if [ -n "$TFACTORY_RESPONSE" ]; then
-  TRANSFER_FACTORY_CID=$(echo "$TFACTORY_RESPONSE" | jq -r '
-    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
-  ' 2>/dev/null || echo "")
-fi
-
-if [ -n "$TRANSFER_FACTORY_CID" ]; then
-  log "  TokenTransferFactory already exists: ${TRANSFER_FACTORY_CID:0:40}..."
-else
-  log "  No existing TokenTransferFactory found, creating via interactive submission..."
-
-  # Get connected synchronizer (reuse if already obtained)
-  if [ -z "$SYNCHRONIZER_ID" ]; then
-    SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
-      | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
-  fi
-
-  # 5a. Prepare the CreateCommand for interactive submission
-  TFACTORY_CMD_ID="create-transfer-factory-$(date +%s)"
-  TPREPARE_BODY=$(jq -n \
-    --arg party "$CBTC_NETWORK_PARTY" \
-    --arg cmdId "$TFACTORY_CMD_ID" \
-    --arg userId "$SHARED_SECRET_USER" \
-    --arg syncId "$SYNCHRONIZER_ID" \
-    '{
-      commands: [{
-        CreateCommand: {
-          templateId: "#fungible-token:Fungible.TokenTransferFactory:TokenTransferFactory",
-          createArguments: {
-            admin: $party,
-            meta: {values: {}}
-          }
-        }
-      }],
-      commandId: $cmdId,
-      userId: $userId,
-      actAs: [$party],
-      readAs: [],
-      disclosedContracts: [],
-      synchronizerId: $syncId,
-      verboseHashing: true,
-      packageIdSelectionPreference: []
-    }')
-
-  log "  Preparing interactive submission..."
-  TPREPARE_RESULT=$(curl_check "$APP_USER_JSON_API/v2/interactive-submission/prepare" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$TPREPARE_BODY") || {
-    log_error "Failed to prepare TokenTransferFactory command"
-    exit 1
-  }
-
-  TPREPARED_TX=$(echo "$TPREPARE_RESULT" | jq -r '.preparedTransaction // empty')
-  TPREPARED_HASH=$(echo "$TPREPARE_RESULT" | jq -r '.preparedTransactionHash // empty')
-  THASHING_VERSION=$(echo "$TPREPARE_RESULT" | jq -r '.hashingSchemeVersion // empty')
-
-  if [ -z "$TPREPARED_TX" ] || [ -z "$TPREPARED_HASH" ]; then
-    log_error "Prepare response missing required fields"
-    log_error "Response: $(echo "$TPREPARE_RESULT" | head -c 500)"
-    exit 1
-  fi
-  log "  Prepared transaction hash: ${TPREPARED_HASH:0:30}..."
-
-  # 5b. Sign the prepared transaction hash with the external party's private key
-  log "  Signing with external party key..."
-  TFACTORY_SIGNATURE=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
-    const { signTransactionHash } = require('@canton-network/core-signing-lib');
-    const signature = signTransactionHash('$TPREPARED_HASH', '$KEYPAIR_PRIV');
-    process.stdout.write(signature);
-  " 2>/dev/null) || TFACTORY_SIGNATURE=""
-
-  if [ -z "$TFACTORY_SIGNATURE" ]; then
-    log_error "Failed to sign prepared transaction"
-    exit 1
-  fi
-
-  # 5c. Execute the signed transaction
-  log "  Executing signed transaction..."
-  TEXECUTE_BODY=$(jq -n \
-    --arg userId "$SHARED_SECRET_USER" \
-    --arg submissionId "register-cbtc-tfactory-$TFACTORY_CMD_ID" \
-    --arg preparedTx "$TPREPARED_TX" \
-    --arg hashVersion "$THASHING_VERSION" \
-    --arg party "$CBTC_NETWORK_PARTY" \
-    --arg sig "$TFACTORY_SIGNATURE" \
-    --arg signedBy "$KEYPAIR_FP" \
-    '{
-      userId: $userId,
-      submissionId: $submissionId,
-      preparedTransaction: $preparedTx,
-      hashingSchemeVersion: $hashVersion,
-      partySignatures: {
-        signatures: [{
-          party: $party,
-          signatures: [{
-            signature: $sig,
-            signedBy: $signedBy,
-            format: "SIGNATURE_FORMAT_RAW",
-            signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"
-          }]
-        }]
-      },
-      deduplicationPeriod: {Empty: {}}
-    }')
-
-  TFACTORY_RESULT=$(curl_check "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$TEXECUTE_BODY") || {
-    log_error "Failed to execute TokenTransferFactory transaction"
-    exit 1
-  }
-
-  TRANSFER_FACTORY_CID=$(echo "$TFACTORY_RESULT" | jq -r '
-    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("TokenTransferFactory")) | .contractId][0] // empty
-  ' 2>/dev/null || echo "")
-
-  if [ -n "$TRANSFER_FACTORY_CID" ]; then
-    log "  TokenTransferFactory created: ${TRANSFER_FACTORY_CID:0:40}..."
-  else
-    log_error "TokenTransferFactory command succeeded but could not extract contract ID"
-    log "  Response: $(echo "$TFACTORY_RESULT" | head -c 500)"
-    exit 1
-  fi
-fi
-
-##############################################################################
-# Step 6: Acquire factory disclosures (with createdEventBlob)
-##############################################################################
-
-log ""
-log "Step 6: Acquiring factory disclosures..."
-
+# 6a. AllocationFactory disclosure
 log "  6a. AllocationFactory disclosure..."
 
-# Re-fetch ledger end and query with includeCreatedEventBlob=true
-LEDGER_END=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
-
-DISCLOSURE_QUERY=$(cat <<DQEOF
-{
-  "filter":{
-    "filtersByParty":{
-      "$CBTC_NETWORK_PARTY":{
-        "cumulative":[{
-          "identifierFilter":{
-            "TemplateFilter":{
-              "value":{
-                "templateId":"#fungible-token:Fungible.TokenAllocationFactory:TokenAllocationFactory",
-                "includeCreatedEventBlob":true
-              }
-            }
-          }
-        }]
-      }
-    }
-  },
-  "verbose":false,
-  "activeAtOffset":"$LEDGER_END"
-}
-DQEOF
-)
-
-DISCLOSURE_RESPONSE=$(curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
-  --data-raw "$DISCLOSURE_QUERY") || {
+AF_DISCLOSURE_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$ALLOCATION_FACTORY_TEMPLATE" "true") || {
   log_error "Failed to query AllocationFactory with disclosure"
   exit 1
 }
 
-# Extract the full disclosure object
-DISCLOSED_CONTRACT=$(echo "$DISCLOSURE_RESPONSE" | jq -c '
+ALLOC_DISCLOSED_CONTRACT=$(echo "$AF_DISCLOSURE_RESPONSE" | jq -c '
   [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract][0]
   | {
       contractId: .createdEvent.contractId,
@@ -832,56 +784,28 @@ DISCLOSED_CONTRACT=$(echo "$DISCLOSURE_RESPONSE" | jq -c '
     }
 ' 2>/dev/null || echo "")
 
-if [ -z "$DISCLOSED_CONTRACT" ] || [ "$DISCLOSED_CONTRACT" = "null" ]; then
+if [ -z "$ALLOC_DISCLOSED_CONTRACT" ] || [ "$ALLOC_DISCLOSED_CONTRACT" = "null" ]; then
   log_error "Failed to extract AllocationFactory disclosure"
   exit 1
 fi
 
-DISCLOSURE_CID=$(echo "$DISCLOSED_CONTRACT" | jq -r '.contractId // empty')
-DISCLOSURE_BLOB=$(echo "$DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
-
-if [ -z "$DISCLOSURE_CID" ] || [ -z "$DISCLOSURE_BLOB" ]; then
-  log_error "Disclosure missing contractId or createdEventBlob"
+ALLOC_BLOB=$(echo "$ALLOC_DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
+if [ -z "$ALLOC_BLOB" ]; then
+  log_error "AllocationFactory disclosure missing createdEventBlob"
   exit 1
 fi
+log "  AllocationFactory disclosure acquired: ${ALLOCATION_FACTORY_CID:0:40}..."
+log "  createdEventBlob length: ${#ALLOC_BLOB}"
 
-log "  AllocationFactory disclosure acquired: ${DISCLOSURE_CID:0:40}..."
-log "  createdEventBlob length: ${#DISCLOSURE_BLOB}"
+# 6b. InstrumentConfiguration disclosure
+log "  6b. InstrumentConfiguration disclosure..."
 
-# 6b. TransferFactory disclosure
-log "  6b. TokenTransferFactory disclosure..."
-
-TDISCLOSURE_QUERY=$(cat <<TDQEOF
-{
-  "filter":{
-    "filtersByParty":{
-      "$CBTC_NETWORK_PARTY":{
-        "cumulative":[{
-          "identifierFilter":{
-            "TemplateFilter":{
-              "value":{
-                "templateId":"$TRANSFER_FACTORY_TEMPLATE",
-                "includeCreatedEventBlob":true
-              }
-            }
-          }
-        }]
-      }
-    }
-  },
-  "verbose":false,
-  "activeAtOffset":"$LEDGER_END"
-}
-TDQEOF
-)
-
-TDISCLOSURE_RESPONSE=$(curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
-  --data-raw "$TDISCLOSURE_QUERY") || {
-  log_error "Failed to query TokenTransferFactory with disclosure"
+IC_DISCLOSURE_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$INSTRUMENT_CONFIG_TEMPLATE" "true") || {
+  log_error "Failed to query InstrumentConfiguration with disclosure"
   exit 1
 }
 
-TRANSFER_DISCLOSED_CONTRACT=$(echo "$TDISCLOSURE_RESPONSE" | jq -c '
+INSTRUMENT_DISCLOSED_CONTRACT=$(echo "$IC_DISCLOSURE_RESPONSE" | jq -c '
   [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract][0]
   | {
       contractId: .createdEvent.contractId,
@@ -891,21 +815,18 @@ TRANSFER_DISCLOSED_CONTRACT=$(echo "$TDISCLOSURE_RESPONSE" | jq -c '
     }
 ' 2>/dev/null || echo "")
 
-if [ -z "$TRANSFER_DISCLOSED_CONTRACT" ] || [ "$TRANSFER_DISCLOSED_CONTRACT" = "null" ]; then
-  log_error "Failed to extract TokenTransferFactory disclosure"
+if [ -z "$INSTRUMENT_DISCLOSED_CONTRACT" ] || [ "$INSTRUMENT_DISCLOSED_CONTRACT" = "null" ]; then
+  log_error "Failed to extract InstrumentConfiguration disclosure"
   exit 1
 fi
 
-TDISCLOSURE_CID=$(echo "$TRANSFER_DISCLOSED_CONTRACT" | jq -r '.contractId // empty')
-TDISCLOSURE_BLOB=$(echo "$TRANSFER_DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
-
-if [ -z "$TDISCLOSURE_CID" ] || [ -z "$TDISCLOSURE_BLOB" ]; then
-  log_error "TransferFactory disclosure missing contractId or createdEventBlob"
+IC_BLOB=$(echo "$INSTRUMENT_DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
+if [ -z "$IC_BLOB" ]; then
+  log_error "InstrumentConfiguration disclosure missing createdEventBlob"
   exit 1
 fi
-
-log "  TransferFactory disclosure acquired: ${TDISCLOSURE_CID:0:40}..."
-log "  createdEventBlob length: ${#TDISCLOSURE_BLOB}"
+log "  InstrumentConfiguration disclosure acquired: ${INSTRUMENT_CONFIG_CID:0:40}..."
+log "  createdEventBlob length: ${#IC_BLOB}"
 
 ##############################################################################
 # Step 7: Write cbtc-factories.json
@@ -915,19 +836,18 @@ log ""
 log "Step 7: Writing cbtc-factories.json..."
 
 FACTORIES_FILE="$SCRIPT_DIR/cbtc-factories.json"
-ALLOC_FACTORY_TEMPLATE="#fungible-token:Fungible.TokenAllocationFactory:TokenAllocationFactory"
 
 jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg cbtcNetworkParty "$CBTC_NETWORK_PARTY" \
   --arg allocCid "$ALLOCATION_FACTORY_CID" \
-  --arg allocTemplateName "TokenAllocationFactory" \
-  --arg allocTemplateId "$ALLOC_FACTORY_TEMPLATE" \
-  --argjson allocDisclosure "$DISCLOSED_CONTRACT" \
-  --arg transferCid "$TRANSFER_FACTORY_CID" \
-  --arg transferTemplateName "TokenTransferFactory" \
-  --arg transferTemplateId "$TRANSFER_FACTORY_TEMPLATE" \
-  --argjson transferDisclosure "$TRANSFER_DISCLOSED_CONTRACT" \
+  --arg allocTemplateName "AllocationFactory" \
+  --arg allocTemplateId "$ALLOCATION_FACTORY_TEMPLATE" \
+  --argjson allocDisclosure "$ALLOC_DISCLOSED_CONTRACT" \
+  --arg icCid "$INSTRUMENT_CONFIG_CID" \
+  --arg icTemplateName "InstrumentConfiguration" \
+  --arg icTemplateId "$INSTRUMENT_CONFIG_TEMPLATE" \
+  --argjson icDisclosure "$INSTRUMENT_DISCLOSED_CONTRACT" \
   '{
     generatedAt: $generatedAt,
     cbtcNetworkParty: $cbtcNetworkParty,
@@ -937,19 +857,19 @@ jq -n \
         templateName: $allocTemplateName,
         templateId: $allocTemplateId,
         disclosure: $allocDisclosure
-      },
-      transferFactory: {
-        contractId: $transferCid,
-        templateName: $transferTemplateName,
-        templateId: $transferTemplateId,
-        disclosure: $transferDisclosure
       }
+    },
+    instrumentConfiguration: {
+      contractId: $icCid,
+      templateName: $icTemplateName,
+      templateId: $icTemplateId,
+      disclosure: $icDisclosure
     }
   }' > "$FACTORIES_FILE"
 
 log "  Written to: $FACTORIES_FILE"
 log "  AllocationFactory CID: ${ALLOCATION_FACTORY_CID:0:40}..."
-log "  TransferFactory CID: ${TRANSFER_FACTORY_CID:0:40}..."
+log "  InstrumentConfiguration CID: ${INSTRUMENT_CONFIG_CID:0:40}..."
 
 ##############################################################################
 # Step 8: Register AllocationFactory in backend (POST /allocation-factory)
@@ -966,14 +886,34 @@ if [ -n "$EXISTING_FACTORY" ] && echo "$EXISTING_FACTORY" | jq -e '.data.factory
   EXISTING_FACTORY_ID=$(echo "$EXISTING_FACTORY" | jq -r '.data.factoryId // .factoryId')
   log "  AllocationFactory already registered in backend: $EXISTING_FACTORY_ID"
 else
+  # Build discloseContracts array with both AllocationFactory and InstrumentConfiguration
+  DISCLOSE_CONTRACTS=$(jq -n \
+    --argjson alloc "$ALLOC_DISCLOSED_CONTRACT" \
+    --argjson ic "$INSTRUMENT_DISCLOSED_CONTRACT" \
+    '[$alloc, $ic]')
+
+  # Build choiceContextData with instrument-configuration and empty credentials
+  CHOICE_CONTEXT_DATA=$(jq -n \
+    --arg icCid "$INSTRUMENT_CONFIG_CID" \
+    '{
+      values: {
+        "sender-credentials": { tag: "AV_List", value: [] },
+        "instrument-configuration": { tag: "AV_ContractId", value: $icCid },
+        "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
+        "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] },
+        "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid }
+      }
+    }')
+
   FACTORY_REG_BODY=$(jq -n \
     --arg factoryId "$ALLOCATION_FACTORY_CID" \
-    --argjson discloseContracts "[$DISCLOSED_CONTRACT]" \
+    --argjson discloseContracts "$DISCLOSE_CONTRACTS" \
+    --argjson choiceContextData "$CHOICE_CONTEXT_DATA" \
     '{
       type: "cbtc",
       factoryId: $factoryId,
       discloseContracts: $discloseContracts,
-      choiceContextData: {"values": {"key": "value"}}
+      choiceContextData: $choiceContextData
     }')
 
   FACTORY_REG_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/allocation-factory" \
@@ -1015,6 +955,27 @@ if [ -n "$EXISTING_ISSUER" ] && echo "$EXISTING_ISSUER" | jq -e '.data.tokenId /
   EXISTING_TOKEN_ID=$(echo "$EXISTING_ISSUER" | jq -r '.data.tokenId // .tokenId')
   log "  Token issuer already registered: tokenId=$EXISTING_TOKEN_ID"
 else
+  # Reuse the same disclose contracts and choice context data from Step 8
+  if [ -z "$DISCLOSE_CONTRACTS" ]; then
+    DISCLOSE_CONTRACTS=$(jq -n \
+      --argjson alloc "$ALLOC_DISCLOSED_CONTRACT" \
+      --argjson ic "$INSTRUMENT_DISCLOSED_CONTRACT" \
+      '[$alloc, $ic]')
+  fi
+  if [ -z "$CHOICE_CONTEXT_DATA" ]; then
+    CHOICE_CONTEXT_DATA=$(jq -n \
+      --arg icCid "$INSTRUMENT_CONFIG_CID" \
+      '{
+        values: {
+          "sender-credentials": { tag: "AV_List", value: [] },
+          "instrument-configuration": { tag: "AV_ContractId", value: $icCid },
+          "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
+          "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] },
+          "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid }
+        }
+      }')
+  fi
+
   TOKEN_ISSUER_BODY=$(jq -n \
     --arg admin "$CBTC_NETWORK_PARTY" \
     --arg tokenId "$CBTC_TOKEN_ID" \
@@ -1023,7 +984,8 @@ else
     --arg symbol "$CBTC_SYMBOL" \
     --arg displayName "$CBTC_DISPLAY_NAME" \
     --arg priceSourceId "$CBTC_PRICE_SOURCE_ID" \
-    --argjson discloseContracts "[$DISCLOSED_CONTRACT]" \
+    --argjson discloseContracts "$DISCLOSE_CONTRACTS" \
+    --argjson choiceContextData "$CHOICE_CONTEXT_DATA" \
     '{
       admin: $admin,
       tokenId: $tokenId,
@@ -1034,7 +996,7 @@ else
       priceSourceId: $priceSourceId,
       metadata: null,
       discloseContracts: $discloseContracts,
-      choiceContextData: {"values": {"key": "value"}}
+      choiceContextData: $choiceContextData
     }')
 
   ISSUER_REG_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/token-issuer" \
@@ -1077,10 +1039,10 @@ log "  CBTC-NETWORK party (external): $CBTC_NETWORK_PARTY"
 log "  Keypair file: $KEYPAIR_FILE"
 log "  Factories file: $FACTORIES_FILE"
 log "  AllocationFactory CID: $ALLOCATION_FACTORY_CID"
-log "  TransferFactory CID: $TRANSFER_FACTORY_CID"
+log "  InstrumentConfiguration CID: $INSTRUMENT_CONFIG_CID"
 log "  Token issuer: $CBTC_TOKEN_ID ($CBTC_DISPLAY_NAME)"
 log ""
 log "Verify:"
 log "  curl -s $BACKEND_URL/allocation-factory/type/cbtc -H 'Authorization: Bearer <token>' | jq"
 log "  curl -s $BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID -H 'Authorization: Bearer <token>' | jq"
-log "  jq '.factories | keys' $FACTORIES_FILE"
+log "  jq '.' $FACTORIES_FILE"

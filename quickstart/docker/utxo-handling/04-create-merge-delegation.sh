@@ -1,18 +1,18 @@
 #!/bin/bash
-# Creates MergeDelegation contracts for each farming wallet party.
+# Creates MergeDelegation contracts for each user wallet party.
 #
 # Two-step process per wallet:
-#   1. Owner (farming wallet, external party) creates MergeDelegationProposal
+#   1. Owner (user wallet, external party) creates MergeDelegationProposal
 #      via interactive submission (signed by wallet's private key)
 #   2. Operator (executor party) accepts the proposal via regular submission
 #      which creates the MergeDelegation contract
 #
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
-#   - generate-farming-wallets.sh must have been run successfully
+#   - 01-generate-user-wallet.sh must have been run successfully
 #   - canton-exchange-backend .env must exist (for EXECUTOR_PARTY_ID)
 #
-# Usage: ./create-merge-delegations.sh
+# Usage: ./04-create-merge-delegation.sh
 
 set -eo pipefail
 
@@ -34,11 +34,11 @@ source "$SETUP_DIR/.env"
 # Alias for shared-secret user (uses the app-user participant)
 SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
 
-# Load farming wallet keypairs
-KEYPAIRS_FILE="$SCRIPT_DIR/farming-wallet-keypairs.json"
+# Load user wallet keypairs
+KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
 if [ ! -f "$KEYPAIRS_FILE" ]; then
-  echo "[merge-delegation] ERROR: Farming wallet keypairs not found: $KEYPAIRS_FILE" >&2
-  echo "[merge-delegation] Run generate-farming-wallets.sh first." >&2
+  echo "[merge-delegation] ERROR: User wallet keypairs not found: $KEYPAIRS_FILE" >&2
+  echo "[merge-delegation] Run 01-generate-user-wallet.sh first." >&2
   exit 1
 fi
 
@@ -63,7 +63,7 @@ PROPOSAL_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Walle
 DELEGATION_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation"
 
 # Output file
-OUTPUT_FILE="$SCRIPT_DIR/farming-wallet-merge-delegation.json"
+OUTPUT_FILE="$SCRIPT_DIR/user-wallet-merge-delegation.json"
 
 ##############################################################################
 # Helper Functions
@@ -131,9 +131,8 @@ generate_canton_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
-# Interactive submission: prepare → sign → execute (for external parties)
-# Usage: interactive_submit <actAs_party> <private_key> <fingerprint> <command_json> <command_id_prefix>
-# Returns: the transaction result JSON
+# Interactive submission: prepare -> sign -> execute (for external parties)
+# Uses temp files to avoid shell variable corruption with large base64 payloads.
 interactive_submit() {
   local party="$1"
   local priv_key="$2"
@@ -141,9 +140,11 @@ interactive_submit() {
   local command_json="$4"
   local cmd_id_prefix="$5"
 
-  local cmd_id="${cmd_id_prefix}-$(date +%s%N)"
+  local cmd_id="${cmd_id_prefix}-$(date +%s)-$RANDOM"
+  local tmp_prepare="/tmp/canton-is-prepare-$$-${RANDOM}.json"
+  local tmp_execute_body="/tmp/canton-is-exec-body-$$-${RANDOM}.json"
+  local tmp_execute_resp="/tmp/canton-is-exec-resp-$$-${RANDOM}.json"
 
-  # Prepare
   local prepare_body
   prepare_body=$(jq -n \
     --arg party "$party" \
@@ -163,44 +164,51 @@ interactive_submit() {
       packageIdSelectionPreference: []
     }')
 
-  local prepare_result
-  prepare_result=$(curl_check "$APP_USER_JSON_API/v2/interactive-submission/prepare" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$prepare_body") || return 1
+  local prepare_http
+  prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
+    "$APP_USER_JSON_API/v2/interactive-submission/prepare" \
+    -H "Authorization: Bearer $CANTON_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-raw "$prepare_body")
 
-  local prepared_tx
-  prepared_tx=$(echo "$prepare_result" | jq -r '.preparedTransaction // empty')
-  local prepared_hash
-  prepared_hash=$(echo "$prepare_result" | jq -r '.preparedTransactionHash // empty')
-  local hashing_version
-  hashing_version=$(echo "$prepare_result" | jq -r '.hashingSchemeVersion // empty')
-
-  if [ -z "$prepared_tx" ] || [ -z "$prepared_hash" ]; then
-    log_error "Prepare response missing required fields"
+  if [ "$prepare_http" != "200" ] && [ "$prepare_http" != "201" ]; then
+    log_error "Prepare failed with HTTP $prepare_http"
+    log_error "Response: $(head -c 500 "$tmp_prepare" 2>/dev/null)"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
     return 1
   fi
 
-  # Sign
-  local signature
-  signature=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
+  local prepared_hash
+  prepared_hash=$(jq -r '.preparedTransactionHash // empty' "$tmp_prepare")
+  local hashing_version
+  hashing_version=$(jq -r '.hashingSchemeVersion // empty' "$tmp_prepare")
+
+  if [ -z "$prepared_hash" ]; then
+    log_error "Prepare response missing preparedTransactionHash"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+
+  local sig
+  sig=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
     const { signTransactionHash } = require('@canton-network/core-signing-lib');
     const signature = signTransactionHash('$prepared_hash', '$priv_key');
     process.stdout.write(signature);
-  " 2>/dev/null) || signature=""
+  " 2>/dev/null) || sig=""
 
-  if [ -z "$signature" ]; then
+  if [ -z "$sig" ]; then
     log_error "Failed to sign prepared transaction"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
     return 1
   fi
 
-  # Execute
-  local execute_body
-  execute_body=$(jq -n \
+  jq -n \
     --arg userId "$SHARED_SECRET_USER" \
-    --arg submissionId "merge-deleg-$cmd_id" \
-    --arg preparedTx "$prepared_tx" \
+    --arg submissionId "merge-deleg-${cmd_id}" \
+    --arg preparedTx "$(jq -r '.preparedTransaction' "$tmp_prepare")" \
     --arg hashVersion "$hashing_version" \
     --arg party "$party" \
-    --arg sig "$signature" \
+    --arg sig "$sig" \
     --arg signedBy "$fp" \
     '{
       userId: $userId,
@@ -219,10 +227,24 @@ interactive_submit() {
         }]
       },
       deduplicationPeriod: {Empty: {}}
-    }')
+    }' > "$tmp_execute_body"
 
-  curl_check "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$execute_body" || return 1
+  local execute_http
+  execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
+    "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
+    -H "Authorization: Bearer $CANTON_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d @"$tmp_execute_body")
+
+  if [ "$execute_http" != "200" ] && [ "$execute_http" != "201" ]; then
+    log_error "Execute failed with HTTP $execute_http"
+    log_error "Response: $(head -c 500 "$tmp_execute_resp" 2>/dev/null)"
+    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
+    return 1
+  fi
+
+  cat "$tmp_execute_resp"
+  rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
 }
 
 # Regular submission for non-external parties
