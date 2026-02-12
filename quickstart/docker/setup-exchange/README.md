@@ -8,7 +8,8 @@ Automated setup and registration scripts for the Canton Exchange Backend (`canto
 |--------|---------|-----------|
 | `01-setup-exchange.sh` | Upload DARs, create on-ledger contracts, generate backend `.env`, start DB | 1st (required) |
 | `02-register-featured-app-right.sh` | Register the FeaturedAppRight contract in the backend database | 2nd (after backend is running) |
-| `03-register-cbtc-token.sh` | Onboard CBTC external party, create AllocationFactory + TransferFactory, register token issuer | 3rd (after backend is running) |
+| `03-register-cbtc-token.sh` | Onboard CBTC external party, create InstrumentConfiguration + AllocationFactory (utility), register token issuer | 3rd (after backend is running) |
+| `04-register-amulet-token.sh` | Register Amulet (CC) token issuer in backend (DSO-managed, dynamic factory) | 4th (after backend is running) |
 
 ## Quick Start
 
@@ -27,8 +28,11 @@ yarn start:dev
 # 4. Register FeaturedAppRight in the backend DB
 ./02-register-featured-app-right.sh
 
-# 5. Register CBTC token (external party + AllocationFactory + TransferFactory + token issuer)
+# 5. Register CBTC token (external party + InstrumentConfiguration + AllocationFactory + token issuer)
 ./03-register-cbtc-token.sh
+
+# 6. Register Amulet token (DSO-managed, dynamic factory — just token issuer DB entry)
+./04-register-amulet-token.sh
 ```
 
 ## Prerequisites
@@ -51,6 +55,15 @@ yarn start:dev
    - `splice-util-batched-markers-1.0.0.dar`
    - `fungible-token-1.0.2.dar`
    - `splice-util-token-standard-wallet-1.0.0.dar`
+   - `utility-collateral-app-v1-1.0.0.dar`
+   - `utility-commercials-v0-0.3.0.dar`
+   - `utility-credential-app-v0-0.3.0.dar`
+   - `utility-credential-v0-0.0.4.dar`
+   - `utility-registry-app-v0-0.5.0.dar`
+   - `utility-registry-holding-v0-0.1.2.dar`
+   - `utility-registry-v0-0.4.1.dar`
+   - `utility-settlement-app-v1-1.1.0.dar`
+   - `utility-version-v0-0.0.1.dar`
 
 3. **`canton-exchange-backend`** cloned at the path configured in `.env` (`EXCHANGE_BACKEND_DIR`). Required for all three scripts.
 
@@ -93,6 +106,19 @@ CBTC token configuration used by `03-register-cbtc-token.sh`:
   "displayName": "Canton BTC",
   "symbol": "CBTC",
   "priceSourceId": "1"
+}
+```
+
+### `amulet-config.json`
+
+Amulet token configuration used by `04-register-amulet-token.sh`:
+
+```json
+{
+  "tokenId": "Amulet",
+  "displayName": "Amulet",
+  "symbol": "CC",
+  "priceSourceId": ""
 }
 ```
 
@@ -177,14 +203,18 @@ curl -s http://localhost:3003/feature-app-right | jq
 
 ## Script 3: `03-register-cbtc-token.sh`
 
-Onboards a CBTC (Canton BTC) external party, creates `TokenAllocationFactory` and `TokenTransferFactory` contracts, and registers the token issuer in the exchange backend.
+Onboards a CBTC (Canton BTC) external party, creates `InstrumentConfiguration` and `AllocationFactory` contracts from the **utility** packages, and registers the token issuer in the exchange backend.
+
+The utility `AllocationFactory` is a single contract that implements three interfaces: `AllocationFactory`, `TransferFactory`, and `BurnMintFactory` — replacing the separate `TokenAllocationFactory` + `TokenTransferFactory` contracts from the fungible-token package.
+
+> **Note**: The previous fungible-token version is preserved as `03-register-cbtc-token-using-fungible-token.sh`.
 
 ```bash
 # Requires: 01-setup-exchange.sh completed AND backend is running
 ./03-register-cbtc-token.sh
 ```
 
-**Prerequisites**: `01-setup-exchange.sh` has been run. The exchange backend is running. `@canton-network/core-signing-lib` must be installed in the exchange backend (used for Ed25519 key generation and signing).
+**Prerequisites**: `01-setup-exchange.sh` has been run (including utility DARs uploaded). The exchange backend is running. `@canton-network/core-signing-lib` must be installed in the exchange backend (used for Ed25519 key generation and signing).
 
 **Steps performed**:
 
@@ -193,20 +223,42 @@ Onboards a CBTC (Canton BTC) external party, creates `TokenAllocationFactory` an
 | 1 | Generate Ed25519 keypair | Creates a NaCl keypair and computes the Canton fingerprint. Stored in `cbtc-network-keypair.json`. Skips if file exists |
 | 2 | Onboard external party | Uses the Canton JSON API v2 external party flow: `generate-topology` -> sign multiHash -> `allocate`. Skips if party already exists |
 | 3 | Create Canton user & grant rights | Creates a dedicated Canton user (`cbtc-network-user`) with `ActAs`/`ReadAs` rights for the external party. Also grants the admin user rights over the external party |
-| 4 | Create TokenAllocationFactory | Uses **interactive submission** (`prepare` -> sign -> `executeAndWaitForTransaction`) since external parties require explicit signing. Skips if contract exists |
-| 5 | Create TokenTransferFactory | Same interactive submission pattern. Creates the factory needed for token transfers and UTXO merging. Skips if contract exists |
-| 6 | Acquire factory disclosures | Re-queries both factories with `includeCreatedEventBlob: true` to get disclosure blobs |
-| 7 | Write `cbtc-factories.json` | Stores both factory contract IDs, template names, template IDs, and disclosures |
-| 8 | Register AllocationFactory in backend | `POST /allocation-factory` with factory ID, type `"cbtc"`, and disclosed contracts |
-| 9 | Register token issuer in backend | `POST /token-issuer` with admin party, token ID, registrar, factory contract ID, symbol, display name, and price source |
+| 4 | Create InstrumentConfiguration | Creates the instrument config for CBTC (`utility-registry-v0`) via **interactive submission**. Defines the token identifier, scheme, and credential requirements. Skips if contract exists |
+| 5 | Create AllocationFactory | Creates the multi-purpose factory (`utility-registry-app-v0`) via **interactive submission**. Implements AllocationFactory, TransferFactory, and BurnMintFactory interfaces. Skips if contract exists |
+| 6 | Acquire disclosures | Re-queries both AllocationFactory and InstrumentConfiguration with `includeCreatedEventBlob: true` to get disclosure blobs |
+| 7 | Write `cbtc-factories.json` | Stores AllocationFactory + InstrumentConfiguration contract IDs, template names, template IDs, and disclosures |
+| 8 | Register AllocationFactory in backend | `POST /allocation-factory` with factory ID, type `"cbtc"`, 2 disclosed contracts, and `choiceContextData` (instrument-configuration + credentials) |
+| 9 | Register token issuer in backend | `POST /token-issuer` with admin party, token ID, registrar, factory contract ID, symbol, display name, price source, disclosed contracts, and choiceContextData |
 
 **Idempotency**: Every step checks for existing state before creating:
 
 - Keypair file reused if `cbtc-network-keypair.json` exists.
 - External party checked via `GET /v2/parties/party?parties=...`.
 - Canton user checked via `GET /v2/users/{userId}` (HTTP 200 = exists).
-- AllocationFactory and TransferFactory queried from active contracts before creating.
+- InstrumentConfiguration and AllocationFactory queried from active contracts before creating.
 - Backend registrations checked via `GET /allocation-factory/type/cbtc` and `GET /token-issuer/token/CBTC`.
+
+### Utility Package Contracts
+
+**InstrumentConfiguration** (`utility-registry-v0`):
+
+- Template: `Utility.Registry.V0.Configuration.Instrument:InstrumentConfiguration`
+- Fields: `operator`, `provider`, `registrar` (all set to CBTC-NETWORK party), `defaultIdentifier` (source=CBTC-NETWORK, id="CBTC", scheme="RegistrarInternalScheme")
+- Signatories: `provider`, `registrar`
+
+**AllocationFactory** (`utility-registry-app-v0`):
+
+- Template: `Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory`
+- Fields: `provider`, `registrar`, `operator` (all set to CBTC-NETWORK party)
+- Signatories: `provider`, `registrar`; Observer: `operator`
+- Implements: `AllocationFactory`, `TransferFactory`, `BurnMintFactory` interfaces
+
+### Backend Registration Format
+
+The backend `POST /allocation-factory` body includes:
+
+- `discloseContracts`: Array of 2 disclosed contracts (AllocationFactory + InstrumentConfiguration) — each with `contractId`, `templateId`, `createdEventBlob`, `synchronizerId`
+- `choiceContextData`: Tagged metadata values including `instrument-configuration` (contract ID reference) and empty credential lists
 
 ### External Party Onboarding Flow
 
@@ -227,13 +279,75 @@ External parties cannot use the standard `submit-and-wait` endpoint. Instead, th
 ### Output Files
 
 - `cbtc-network-keypair.json`: Stores the generated keypair, fingerprint, and resolved party ID. Keep this file for future runs.
-- `cbtc-factories.json`: Stores AllocationFactory and TransferFactory contract IDs, template names, template IDs, and disclosure blobs. Used by `utxo-handling/farming-wallet-utxo-merging.sh`.
+- `cbtc-factories.json`: Stores AllocationFactory and InstrumentConfiguration contract IDs, template names, template IDs, and disclosure blobs.
 
 **Verify registration**:
 
 ```bash
 curl -s http://localhost:3003/allocation-factory/type/cbtc -H 'Authorization: Bearer <token>' | jq
 curl -s http://localhost:3003/token-issuer/token/CBTC -H 'Authorization: Bearer <token>' | jq
+jq '.' cbtc-factories.json
+```
+
+---
+
+## Script 4: `04-register-amulet-token.sh`
+
+Registers the Amulet (CC) token issuer in the exchange backend. Unlike CBTC which requires external party onboarding and on-ledger contract creation, Amulet is the **native Canton Network cryptocurrency managed by the DSO** (Designated Sponsoring Organization).
+
+The Amulet allocation factory is fetched **dynamically** from the validator's scan-proxy registry at runtime, so no allocation-factory database entry or contract creation is needed.
+
+```bash
+# Requires: 01-setup-exchange.sh completed AND backend is running
+./04-register-amulet-token.sh
+```
+
+**Prerequisites**: `01-setup-exchange.sh` has been run. The exchange backend is running.
+
+**Steps performed**:
+
+| Step | Action | Details |
+|------|--------|---------|
+| 1 | Resolve DSO party | Reads DSO party from backend `.env`, or falls back to the validator API (`/v0/scan-proxy/dso-party-id`) |
+| 2 | Verify allocation factory | Calls `GET /allocation-factory/type/amulet` to verify the dynamic factory is accessible from the scan-proxy. Non-blocking if unavailable |
+| 3 | Register token issuer | `POST /token-issuer` with admin=DSO party, tokenId="Amulet", symbol="CC". `discloseContracts` and `choiceContextData` are empty (overridden at runtime with live data) |
+
+**Idempotency**: The script checks if the Amulet token issuer already exists (`GET /token-issuer/token/Amulet`) before registering. Backend returns HTTP 409 if already registered, handled gracefully.
+
+### How Amulet Differs from CBTC
+
+| Aspect | CBTC (Script 03) | Amulet (Script 04) |
+|--------|-------------------|---------------------|
+| Admin party | External party (CBTC-NETWORK) | DSO party (pre-existing) |
+| Party onboarding | Ed25519 keypair + external party allocation | Not needed |
+| Contract creation | InstrumentConfiguration + AllocationFactory | Not needed (DSO-managed) |
+| Allocation factory | Stored in backend DB | Fetched dynamically from scan-proxy |
+| Disclosed contracts | 2 contracts (AllocationFactory + InstrumentConfiguration) | 3 contracts (ExternalPartyAmuletRules + AmuletRules + OpenMiningRound) — provided at runtime |
+| `choiceContextData` | instrument-configuration + credentials | amulet-rules + open-round — provided at runtime |
+| Token issuer | Stored with factory details | Stored with empty factory details (enriched at runtime) |
+
+### Dynamic Factory Contracts
+
+When the backend receives a request for `GET /allocation-factory/type/amulet`, it calls the validator's scan-proxy registry:
+
+```
+POST /v0/scan-proxy/registry/allocation-instruction/v1/allocation-factory
+Body: { "choiceArguments": {}, "excludeDebugFields": true }
+```
+
+The response includes:
+
+- **`factoryId`**: Contract ID of the `ExternalPartyAmuletRules` contract
+- **`disclosedContracts`**: 3 contracts (ExternalPartyAmuletRules, AmuletRules, OpenMiningRound)
+- **`choiceContextData`**: `amulet-rules` (AmuletRules CID) and `open-round` (OpenMiningRound CID)
+
+These values change as rounds advance, which is why they must be fetched dynamically.
+
+**Verify registration**:
+
+```bash
+curl -s http://localhost:3003/token-issuer/token/Amulet -H 'Authorization: Bearer <token>' | jq
+curl -s http://localhost:3003/allocation-factory/type/amulet -H 'Authorization: Bearer <token>' | jq
 ```
 
 ---

@@ -6,7 +6,12 @@
       "Bash(bash:*)",
       "Bash(docker compose up:*)",
       "Bash(docker network ls:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(NUM_WALLETS=2 MINTS_PER_WALLET=2 bash:*)",
+      "Bash(NUM_WALLETS=2 TAPS_PER_WALLET=2 bash:*)",
+      "Bash(NUM_WALLETS=2 bash:*)",
+      "WebFetch(domain:docs.digitalasset.com)",
+      "WebFetch(domain:docs.dev.sync.global)"
     ]
   }
 }

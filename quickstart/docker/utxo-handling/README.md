@@ -1,14 +1,21 @@
 # UTXO Handling Scripts
 
-Scripts for generating farming wallets with CBTC token holdings and setting up merge delegations on the local Canton Network Quickstart. These simulate UTXO-like token distribution for testing exchange operations such as holding merges and airdrops.
+Scripts for generating user wallets with CBTC token holdings and setting up merge delegations on the local Canton Network Quickstart. These simulate UTXO-like token distribution for testing exchange operations such as holding merges and airdrops.
 
 ## Scripts Overview
 
 | Script | Purpose | Run Order |
 |--------|---------|-----------|
-| `generate-farming-wallets.sh` | Generate 25 external-party wallets, mint CBTC holdings for each | 1st |
-| `create-merge-delegations.sh` | Create MergeDelegation contracts for each farming wallet | 2nd |
-| `farming-wallet-utxo-merging.sh` | Merge all CBTC holdings per wallet into a single holding | 3rd |
+| `01-generate-user-wallet.sh` | Generate 25 external-party wallets and onboard them | 1st |
+| `02-request-minting-cbtc.sh` | Mint CBTC token holdings for each wallet | 2nd |
+| `03-request-faucet-amulet.sh` | Faucet Amulet (CC) token holdings for each wallet | 3rd |
+| `04-create-merge-delegation.sh` | Create MergeDelegation contracts for each user wallet | 4th |
+| `05-user-wallet-utxo-merging-cbtc.sh` | Merge all CBTC holdings per wallet into a single holding | 5th |
+| `06-user-wallet-utxo-merging-amulet.sh` | Merge all Amulet holdings per wallet into a single holding | 6th |
+| `07-query-holdings-cbtc.sh` | Query current CBTC holdings from the ledger | 7th |
+| `08-query-holdings-amulet.sh` | Query current Amulet holdings from the ledger | 8th |
+| `09-merge-holdings-cbtc.sh` | Merge CBTC holdings using pre-queried JSON input | 9th |
+| `10-merge-holdings-amulet.sh` | Merge Amulet holdings using pre-queried JSON input | 10th |
 
 ## Quick Start
 
@@ -16,14 +23,39 @@ Scripts for generating farming wallets with CBTC token holdings and setting up m
 # Ensure quickstart is running and setup-exchange scripts have completed
 # (01-setup-exchange.sh, 02-register-featured-app-right.sh, 03-register-cbtc-token.sh)
 
-# 1. Generate farming wallets and mint CBTC holdings
-./generate-farming-wallets.sh
+# 1. Generate user wallets (keypairs + external party onboarding)
+./01-generate-user-wallet.sh
 
-# 2. Create MergeDelegation contracts for each wallet
-./create-merge-delegations.sh
+# 2. Mint CBTC token holdings for each wallet
+./02-request-minting-cbtc.sh
 
-# 3. Merge all CBTC holdings into single holdings per wallet
-./farming-wallet-utxo-merging.sh
+# 3. Faucet Amulet (CC) token holdings for each wallet
+./03-request-faucet-amulet.sh
+
+# 4. Create MergeDelegation contracts for each wallet
+./04-create-merge-delegation.sh
+
+# 5. Merge all CBTC holdings into single holdings per wallet
+./05-user-wallet-utxo-merging-cbtc.sh
+
+# 6. Merge all Amulet holdings into single holdings per wallet
+./06-user-wallet-utxo-merging-amulet.sh
+
+# --- Alternative: Query-then-Merge workflow (scripts 07-10) ---
+# Instead of scripts 05/06 (which query + merge in one step),
+# you can split into separate query and merge phases:
+
+# 7. Query current CBTC holdings from the ledger
+./07-query-holdings-cbtc.sh
+
+# 8. Query current Amulet holdings from the ledger
+./08-query-holdings-amulet.sh
+
+# 9. Merge CBTC holdings (reads from 07's JSON output)
+./09-merge-holdings-cbtc.sh
+
+# 10. Merge Amulet holdings (reads from 08's JSON output)
+./10-merge-holdings-amulet.sh
 ```
 
 ## Prerequisites
@@ -37,7 +69,7 @@ Scripts for generating farming wallets with CBTC token holdings and setting up m
 2. **Setup-exchange completed** -- all three scripts must have been run:
    - `01-setup-exchange.sh` (DARs uploaded, contracts created, backend DB migrated)
    - `02-register-featured-app-right.sh` (FeaturedAppRight registered)
-   - `03-register-cbtc-token.sh` (CBTC-NETWORK external party onboarded, AllocationFactory + TransferFactory + token issuer registered)
+   - `03-register-cbtc-token.sh` (CBTC-NETWORK external party onboarded, AllocationFactory + token issuer registered)
 
 3. **Canton Exchange Backend running**:
 
@@ -55,14 +87,14 @@ Scripts for generating farming wallets with CBTC token holdings and setting up m
 
 ---
 
-## Script 1: `generate-farming-wallets.sh`
+## Script 1: `01-generate-user-wallet.sh`
 
-Generates 25 farming wallet external parties, onboards them on the app-user participant, and mints 20 CBTC token holdings per wallet (500 total).
+Generates 25 user wallet external parties and onboards them on the app-user participant.
 
 ### Usage
 
 ```bash
-./generate-farming-wallets.sh
+./01-generate-user-wallet.sh
 ```
 
 ### Configuration
@@ -71,7 +103,7 @@ Configurable constants at the top of the script:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NUM_WALLETS` | `25` | Number of farming wallets to generate |
+| `NUM_WALLETS` | `25` | Number of user wallets to generate |
 | `MINTS_PER_WALLET` | `20` | Number of CBTC mint requests per wallet |
 | `MIN_AMOUNT` | `100` | Minimum CBTC amount per holding |
 | `MAX_AMOUNT` | `1000` | Maximum CBTC amount per holding |
@@ -81,52 +113,32 @@ Configurable constants at the top of the script:
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | Pre-flight | Sources `../setup-exchange/.env`, loads CBTC config and keypair, generates Canton JWT, gets synchronizer ID |
-| 1 | Generate keypairs | Creates 25 Ed25519 keypairs in a single Node.js invocation using `@canton-network/core-signing-lib`. Saves to `farming-wallet-keypairs.json` |
+| — | Cleanup | Removes downstream JSON files from previous runs (`user-wallet-holdings-*.json`, `user-wallet-merge-delegation.json`, `user-wallet-merged-holdings-*.json`) |
+| 1 | Generate keypairs | Creates 25 Ed25519 keypairs in a single Node.js invocation using `@canton-network/core-signing-lib`. Saves to `user-wallet-keypairs.json` |
 | 2 | Onboard external parties | For each wallet: `generate-topology` -> sign multiHash -> `allocate`. Updates keypairs file with resolved party IDs |
 | 3 | Create Canton users | Creates 25 Canton users with `CanActAs`/`CanReadAs` rights. Also grants admin user rights over each wallet party |
-| 4 | Create TokenMintRequests | For each wallet, creates 20 `TokenMintRequest` contracts via **interactive submission** (external party signing). Random amounts between 100-1000 CBTC |
-| 5 | Accept mint requests | CBTC-NETWORK accepts all 500 mint requests by exercising `AcceptMint` via **interactive submission**, creating `TokenHolding` contracts |
-| 6 | Write holdings report | Writes `farming-wallet-holdings.json` with per-wallet holdings (contract IDs, amounts, totals) |
-
-### Daml Minting Flow
-
-The minting follows the `TokenMintRequest` / `AcceptMint` pattern from `fungible-token`:
-
-1. **Wallet (owner)** creates `TokenMintRequest` (`#fungible-token:Fungible.TokenMint:TokenMintRequest`):
-   - `instrumentId: { admin: CBTC_NETWORK_PARTY, id: "CBTC" }`
-   - `recipient: WALLET_PARTY`
-   - `amount: <random 100-1000>`
-   - Signatory: `recipient`; Observer: `instrumentId.admin`
-
-2. **CBTC-NETWORK (admin)** exercises `AcceptMint` on the mint request:
-   - Controller: `instrumentId.admin`
-   - Creates `TokenHolding` with `{ admin, owner=recipient, amount, instrumentId, lock=None, meta=emptyMetadata }`
-
-Both parties are external, so both steps use **interactive submission** (prepare -> sign -> execute).
 
 ### Idempotency
 
-- Keypair generation is skipped if `farming-wallet-keypairs.json` already exists with the correct number of entries.
+- Keypair generation is skipped if `user-wallet-keypairs.json` already exists with the correct number of entries.
 - External party allocation checks if each party exists before allocating.
 - Canton user creation checks via `GET /v2/users/{userId}` before creating.
-- **Mint requests and holdings are NOT idempotent** -- re-running the script will create additional holdings. Delete the output files and re-run from scratch if needed.
 
 ### Output Files
 
 | File | Description |
 |------|-------------|
-| `farming-wallet-keypairs.json` | Array of 25 wallet entries with `partyHint`, `userId`, `partyId`, `publicKey`, `privateKey`, `fingerprint` |
-| `farming-wallet-holdings.json` | Holdings report with per-wallet `holdings[]` (contractId, amount) and `totalAmount` |
+| `user-wallet-keypairs.json` | Array of 25 wallet entries with `partyHint`, `userId`, `partyId`, `publicKey`, `privateKey`, `fingerprint` |
 
-#### `farming-wallet-keypairs.json` format
+#### `user-wallet-keypairs.json` format
 
 ```json
 [
   {
     "index": 0,
-    "partyHint": "farming-wallet-01",
-    "userId": "farming-wallet-01-user",
-    "partyId": "farming-wallet-01::1220...",
+    "partyHint": "user-wallet-01",
+    "userId": "user-wallet-01-user",
+    "partyId": "user-wallet-01::1220...",
     "publicKey": "base64...",
     "privateKey": "base64...",
     "fingerprint": "1220..."
@@ -134,7 +146,67 @@ Both parties are external, so both steps use **interactive submission** (prepare
 ]
 ```
 
-#### `farming-wallet-holdings.json` format
+---
+
+## Script 2: `02-request-minting-cbtc.sh`
+
+Mints CBTC token holdings for each user wallet using the utility package's `AllocationFactory`. Creates multiple holdings per wallet to simulate UTXO-like token distribution.
+
+### Usage
+
+```bash
+# Requires: 01-generate-user-wallet.sh + setup-exchange 03-register-cbtc-token.sh completed
+./02-request-minting-cbtc.sh
+```
+
+### Configuration
+
+Configurable via `utxo-handling/.env` or environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MINTS_PER_WALLET` | `20` | Number of CBTC mint requests per wallet |
+| `MIN_AMOUNT` | `100` | Minimum CBTC amount per holding |
+| `MAX_AMOUNT` | `1000` | Maximum CBTC amount per holding |
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources configs, loads CBTC-NETWORK keypair + AllocationFactory + InstrumentConfiguration from `cbtc-factories.json`, generates JWT, gets synchronizer |
+| 1 | Request mints | For each wallet, creates 20 `MintRequest` contracts by exercising `AllocationFactory_RequestMint` via **interactive submission** (wallet signs). Random amounts between 100-1000 CBTC |
+| 2 | Accept mints | CBTC-NETWORK accepts all 500 mint requests by exercising `MintRequest_Accept` via **interactive submission**, creating `Holding` contracts |
+| 3 | Write report | Writes `user-wallet-holdings-cbtc.json` with per-wallet holdings (contract IDs, amounts, totals) |
+
+### Daml Minting Flow
+
+The minting follows the `AllocationFactory_RequestMint` / `MintRequest_Accept` pattern from the utility package:
+
+1. **Wallet (holder, external party)** exercises `AllocationFactory_RequestMint` on the `AllocationFactory` contract:
+   - Template: `#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory`
+   - Arguments: `instrumentId: { admin: CBTC_NETWORK, id: "CBTC" }`, `amount`, `holder`, `reference`, timestamps
+   - ExtraArgs: `instrument-configuration` (CID) + empty `issuer-credentials`
+   - AllocationFactory + InstrumentConfiguration passed as **disclosed contracts**
+   - Creates a `MintRequest` contract
+
+2. **CBTC-NETWORK (registrar, external party)** exercises `MintRequest_Accept`:
+   - Template: `#utility-registry-app-v0:Utility.Registry.App.V0.Model.Mint:MintRequest`
+   - No disclosed contracts needed (registrar is signatory)
+   - Creates a `Holding` + `ExecutedMint`
+
+Both parties are external, so both steps use **interactive submission** (prepare -> sign -> execute).
+
+### Idempotency
+
+**Mint requests and holdings are NOT idempotent** -- re-running the script will create additional holdings. To start fresh, delete the output file and re-run `01-generate-user-wallet.sh` first (which cleans up downstream JSON files).
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-holdings-cbtc.json` | Holdings report with per-wallet `holdings[]` (contractId, amount) and `totalAmount` |
+
+#### `user-wallet-holdings-cbtc.json` format
 
 ```json
 {
@@ -144,9 +216,9 @@ Both parties are external, so both steps use **interactive submission** (prepare
   "totalHoldings": 500,
   "wallets": [
     {
-      "partyHint": "farming-wallet-01",
-      "partyId": "farming-wallet-01::1220...",
-      "userId": "farming-wallet-01-user",
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
       "holdings": [
         { "contractId": "00...", "amount": 423 },
         { "contractId": "00...", "amount": 781 }
@@ -159,30 +231,109 @@ Both parties are external, so both steps use **interactive submission** (prepare
 
 ---
 
-## Script 2: `create-merge-delegations.sh`
+## Script 3: `03-request-faucet-amulet.sh`
 
-Creates `MergeDelegation` contracts that allow the exchange backend's executor party to merge token holdings on behalf of each farming wallet.
+Faucets Amulet (CC) tokens for each user wallet using the DevNet `AmuletRules_DevNet_Tap` choice. Creates multiple Amulet holdings per wallet.
 
 ### Usage
 
 ```bash
-# Requires: generate-farming-wallets.sh completed
-./create-merge-delegations.sh
+# Requires: 01-generate-user-wallet.sh completed, quickstart in DevNet mode
+./03-request-faucet-amulet.sh
+```
+
+### Configuration
+
+Configurable via `utxo-handling/.env` or environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TAPS_PER_WALLET` | `20` | Number of Amulet taps per wallet |
+| `MIN_AMOUNT` | `100` | Minimum CC amount per holding |
+| `MAX_AMOUNT` | `1000` | Maximum CC amount per holding |
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources config, generates JWTs for app-user and SV participants, gets synchronizer ID, resolves DSO party ID |
+| 1 | Fetch SV contracts | Fetches `AmuletRules` + `OpenMiningRound` from SV participant with `includeCreatedEventBlob: true` for use as disclosed contracts |
+| 2 | Tap Amulet | For each wallet, exercises `AmuletRules_DevNet_Tap` N times via **interactive submission** (wallet signs). Random amounts between 100-1000 CC |
+| 3 | Write report | Writes `user-wallet-holdings-amulet.json` with per-wallet Amulet holdings |
+
+### Daml Fauceting Flow
+
+1. **Fetch disclosed contracts** from SV participant (port 4975):
+   - `AmuletRules` (`#splice-amulet:Splice.AmuletRules:AmuletRules`) -- DSO is signatory
+   - `OpenMiningRound` (`#splice-amulet:Splice.Round:OpenMiningRound`) -- picks the latest round
+
+2. **Wallet (receiver, external party)** exercises `AmuletRules_DevNet_Tap`:
+   - Template: `#splice-amulet:Splice.AmuletRules:AmuletRules`
+   - Arguments: `receiver` (wallet party), `amount` (decimal), `openRound` (CID)
+   - AmuletRules + OpenMiningRound passed as **disclosed contracts**
+   - Creates an `Amulet` contract (the CC holding)
+
+> **Note**: This choice is only available in **DevNet mode**. It does not exist on TestNet or MainNet.
+
+### Idempotency
+
+**Amulet taps are NOT idempotent** -- re-running the script will create additional holdings.
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-holdings-amulet.json` | Holdings report with per-wallet Amulet holdings |
+
+#### `user-wallet-holdings-amulet.json` format
+
+```json
+{
+  "generatedAt": "2026-02-11T...",
+  "dsoParty": "DSO::1220...",
+  "tokenId": "Amulet",
+  "totalHoldings": 500,
+  "wallets": [
+    {
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
+      "holdings": [
+        { "contractId": "00...", "amount": 547 },
+        { "contractId": "00...", "amount": 312 }
+      ],
+      "totalAmount": 11234
+    }
+  ]
+}
+```
+
+---
+
+## Script 4: `04-create-merge-delegation.sh`
+
+Creates `MergeDelegation` contracts that allow the exchange backend's executor party to merge token holdings on behalf of each user wallet.
+
+### Usage
+
+```bash
+# Requires: 01-generate-user-wallet.sh completed
+./04-create-merge-delegation.sh
 ```
 
 ### What It Does
 
 | Step | Action | Details |
 |------|--------|---------|
-| 0 | Pre-flight | Loads config, farming wallet keypairs, reads `EXECUTOR_PARTY_ID` from backend `.env`, generates Canton JWT |
+| 0 | Pre-flight | Loads config, user wallet keypairs, reads `EXECUTOR_PARTY_ID` from backend `.env`, generates Canton JWT |
 | 1 | Create delegations | For each wallet: (a) owner creates `MergeDelegationProposal` via interactive submission, (b) operator accepts via regular submission |
-| 2 | Write report | Writes `farming-wallet-merge-delegation.json` with delegation contract IDs |
+| 2 | Write report | Writes `user-wallet-merge-delegation.json` with delegation contract IDs |
 
 ### MergeDelegation Workflow
 
 The creation follows a two-step proposal/accept pattern from `splice-util-token-standard-wallet`:
 
-1. **Owner (farming wallet, external party)** creates `MergeDelegationProposal`:
+1. **Owner (user wallet, external party)** creates `MergeDelegationProposal`:
    - Template: `#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegationProposal`
    - Arguments: `{ delegation: { operator: EXECUTOR_PARTY, owner: WALLET_PARTY, meta: { values: {} } } }`
    - Signatory: `delegation.owner`; Observer: `delegation.operator`
@@ -207,7 +358,7 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
 
 ### Output File
 
-`farming-wallet-merge-delegation.json`:
+`user-wallet-merge-delegation.json`:
 
 ```json
 {
@@ -217,9 +368,9 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
   "totalDelegations": 25,
   "wallets": [
     {
-      "partyHint": "farming-wallet-01",
-      "partyId": "farming-wallet-01::1220...",
-      "userId": "farming-wallet-01-user",
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
       "mergeDelegationContractId": "00..."
     }
   ]
@@ -230,7 +381,7 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
 
 ## MergeDelegation Smart Contract Workflow
 
-The MergeDelegation system enables an **operator** (the exchange backend's executor party) to merge token holdings on behalf of **owners** (farming wallet external parties). This section describes the Daml templates, their lifecycle, and how the scripts use them.
+The MergeDelegation system enables an **operator** (the exchange backend's executor party) to merge token holdings on behalf of **owners** (user wallet external parties). This section describes the Daml templates, their lifecycle, and how the scripts use them.
 
 ### Templates Overview
 
@@ -290,11 +441,11 @@ The workflow involves three Daml templates from `splice-util-token-standard-wall
 
 ```mermaid
 sequenceDiagram
-    participant Owner as Owner<br/>(Farming Wallet)
+    participant Owner as Owner<br/>(User Wallet)
     participant Ledger as Canton Ledger
     participant Operator as Operator<br/>(Exchange Backend)
 
-    Note over Owner,Operator: Phase 1: Delegation Setup (create-merge-delegations.sh)
+    Note over Owner,Operator: Phase 1: Delegation Setup (04-create-merge-delegation.sh)
 
     Owner->>Ledger: Create MergeDelegationProposal<br/>{operator, owner, meta}
     Note right of Owner: Interactive submission<br/>(external party signing)
@@ -305,28 +456,28 @@ sequenceDiagram
     Ledger-->>Owner: MergeDelegation active<br/>(both are signatories)
     Ledger-->>Operator: MergeDelegation active
 
-    Note over Owner,Operator: Phase 2: Holding Merge (farming-wallet-utxo-merging.sh)
+    Note over Owner,Operator: Phase 2: Holding Merge (05-user-wallet-utxo-merging-cbtc.sh)
 
     Operator->>Ledger: Query MergeDelegation<br/>for wallet
     Ledger-->>Operator: MergeDelegation confirmed
 
-    Operator->>Ledger: Query TokenHoldings<br/>for wallet party
+    Operator->>Ledger: Query Holdings<br/>for wallet party
     Ledger-->>Operator: N holdings<br/>[H1, H2, ..., HN]
 
     alt N > 1 (multiple holdings — merge needed)
-        Note over Owner,Operator: Step A: Self-Transfer via TransferFactory
+        Note over Owner,Operator: Step A: Self-Transfer via TransferFactory interface on AllocationFactory
 
-        Owner->>Ledger: Exercise TransferFactory_Transfer<br/>{sender=owner, receiver=owner,<br/>inputHoldingCids=[H1..HN],<br/>amount=total}
+        Owner->>Ledger: Exercise TransferFactory_Transfer<br/>on AllocationFactory contract<br/>{sender=owner, receiver=owner,<br/>inputHoldingCids=[H1..HN],<br/>amount=total}
         Note right of Owner: Interactive submission<br/>Factory passed as disclosed contract
-        Ledger-->>Ledger: Create TokenTransferInstruction<br/>(pending — requires acceptance)
+        Ledger-->>Ledger: Create TransferInstruction<br/>(pending — requires acceptance)
         Ledger-->>Owner: TransferInstruction created
 
         Note over Owner,Operator: Step B: Accept Transfer Instruction
 
         Owner->>Ledger: Exercise TransferInstruction_Accept
         Note right of Owner: Interactive submission
-        Ledger-->>Ledger: Archive all input holdings<br/>Archive TransferInstruction<br/>Create single TokenHolding<br/>(amount = sum of all inputs)
-        Ledger-->>Owner: Merged TokenHolding created
+        Ledger-->>Ledger: Archive all input holdings<br/>Archive TransferInstruction<br/>Create single Holding<br/>(amount = sum of all inputs)
+        Ledger-->>Owner: Merged Holding created
     else N = 1 (single holding — already merged)
         Note over Owner,Operator: Skip — wallet already has one holding
     end
@@ -341,14 +492,16 @@ sequenceDiagram
 
 The `MergeDelegation_Merge` choice is designed to execute a self-transfer through a `TransferFactory` and expects the factory to return `TransferInstructionResult_Completed` — meaning the merge completes in a single atomic transaction.
 
-However, the **fungible token** `TokenTransferFactory` always returns `TransferInstructionResult_Pending` for self-transfers, creating a `TokenTransferInstruction` that requires a separate `TransferInstruction_Accept` step. This two-step behavior is a design characteristic of fungible tokens (as opposed to Amulet tokens, where self-transfers complete immediately).
+However, both the **utility** `AllocationFactory` (used for CBTC) and the **Amulet** `ExternalPartyAmuletRules` return `TransferInstructionResult_Pending` for transfers, creating a transfer instruction that requires a separate `TransferInstruction_Accept` step.
 
 Because of this incompatibility:
 
 1. The scripts **create MergeDelegation contracts** to establish the delegation relationship and prove the operator is authorized to act on behalf of the owner.
 2. The scripts **perform the actual merge** using the two-step `TransferFactory_Transfer` → `TransferInstruction_Accept` mechanism directly, bypassing `MergeDelegation_Merge`.
 
-This approach works correctly with fungible tokens while still maintaining the delegation authorization model.
+> **Note**: The utility `AllocationFactory` is a single contract that implements multiple Splice token standard interfaces: `AllocationFactory` (minting), `TransferFactory` (transfers), and `BurnMintFactory` (burn/mint). When the scripts exercise `TransferFactory_Transfer`, they are exercising an interface choice on the `AllocationFactory` contract — there is no separate `TransferFactory` contract.
+
+This approach works correctly with both CBTC (utility AllocationFactory) and Amulet (ExternalPartyAmuletRules) while maintaining the delegation authorization model.
 
 ### BatchMergeUtility (Advanced)
 
@@ -358,19 +511,19 @@ For production use cases with many wallets and multiple token types, the `BatchM
 2. **Exercise `BatchMergeUtility_Call`** for each `MergeDelegation` — processes one owner's merge and threads the updated `changeHoldings` to the next call
 3. **Exercise `BatchMergeUtility_Close`** when done — archives the utility and returns final change holdings
 
-This pattern is optimized for Amulet tokens where `MergeDelegation_Merge` returns `Completed` results. It is not used by these scripts since fungible tokens require the two-step flow.
+This pattern is optimized for token factories that return `TransferInstructionResult_Completed` from self-transfers. It is not used by these scripts since both the utility `AllocationFactory` (CBTC) and `ExternalPartyAmuletRules` (Amulet) return `TransferInstructionResult_Pending`, requiring the two-step flow.
 
 ---
 
-## Script 3: `farming-wallet-utxo-merging.sh`
+## Script 5: `05-user-wallet-utxo-merging-cbtc.sh`
 
-Merges all CBTC token holdings for each farming wallet into a single holding per wallet, then verifies that balances are preserved.
+Merges all CBTC token holdings for each user wallet into a single holding per wallet, then verifies that balances are preserved.
 
 ### Usage
 
 ```bash
-# Requires: 03-register-cbtc-token.sh + generate-farming-wallets.sh + create-merge-delegations.sh completed
-./farming-wallet-utxo-merging.sh
+# Requires: 02-request-minting-cbtc.sh + 04-create-merge-delegation.sh completed
+./05-user-wallet-utxo-merging-cbtc.sh
 ```
 
 ### What It Does
@@ -378,32 +531,34 @@ Merges all CBTC token holdings for each farming wallet into a single holding per
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | Pre-flight | Loads config, keypairs, delegation data, original holdings; generates JWT; gets synchronizer |
-| 1 | Load TransferFactory | Reads `TokenTransferFactory` contract ID and disclosure from `../setup-exchange/cbtc-factories.json` (created by `03-register-cbtc-token.sh`) |
+| 1 | Load AllocationFactory | Reads `AllocationFactory` contract ID and disclosure from `../setup-exchange/cbtc-factories.json` (created by `03-register-cbtc-token.sh`). The AllocationFactory implements the `TransferFactory` interface used for merging |
 | 2 | Merge holdings | For each wallet: validates MergeDelegation exists, queries holdings, performs two-step self-transfer merge |
-| 3 | Write report | Writes `farming-wallet-merged-holdings.json` with one holding per wallet |
-| 4 | Verify balances | Compares merged totals with original `farming-wallet-holdings.json` totals |
+| 3 | Write report | Writes `user-wallet-merged-holdings-cbtc.json` with one holding per wallet |
+| 4 | Verify balances | Compares merged totals with original `user-wallet-holdings-cbtc.json` totals |
 
 ### Two-Step Self-Transfer Merge
 
-The merge uses the fungible token transfer pipeline. For each wallet with multiple holdings:
+The merge uses the utility `AllocationFactory` which implements the `TransferFactory` interface. For each wallet with multiple holdings:
 
-1. **Exercise `TransferFactory_Transfer`** on the `TokenTransferFactory` (self-transfer: sender = receiver = wallet):
-   - Template: `#fungible-token:Fungible.TokenTransferFactory:TokenTransferFactory`
+1. **Exercise `TransferFactory_Transfer`** on the `AllocationFactory` contract (self-transfer: sender = receiver = wallet):
+   - Interface: `Splice.Api.Token.TransferInstructionV1:TransferFactory` (exercised via `templateId` field)
+   - Contract: `AllocationFactory` (`#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory`)
    - The factory contract is passed as a **disclosed contract** (wallet isn't an observer)
    - `inputHoldingCids`: all existing holding CIDs for the wallet
    - `amount`: total of all holdings
-   - Returns: a pending `TokenTransferInstruction`
+   - Returns: a pending `TransferOffer` / `TransferInstruction`
    - Submitted via **interactive submission** (wallet signs)
 
 2. **Exercise `TransferInstruction_Accept`** on the pending instruction:
-   - Template: `#fungible-token:Fungible.TokenTransferInstruction:TokenTransferInstruction`
    - Archives all input holdings + the instruction
-   - Creates a single merged `TokenHolding` with the total amount
+   - Creates a single merged `Holding` with the total amount
    - Submitted via **interactive submission** (wallet signs)
+
+> **Note**: The `AllocationFactory` is a single contract implementing three Splice token standard interfaces: `AllocationFactory` (minting), `TransferFactory` (transfers), and `BurnMintFactory` (burn/mint). There is no separate `TransferFactory` contract — the interface choice is exercised directly on the `AllocationFactory` contract.
 
 ### Why Not MergeDelegation_Merge?
 
-The `MergeDelegation_Merge` choice expects the `TransferFactory` to return `TransferInstructionResult_Completed` immediately. However, the fungible token `TokenTransferFactory` returns `TransferInstructionResult_Pending` for self-transfers (creating a `TokenTransferInstruction` that requires acceptance). This design difference means `MergeDelegation_Merge` cannot be used directly with fungible tokens — it's designed for Amulet tokens where self-transfers complete in one step.
+The `MergeDelegation_Merge` choice expects the `TransferFactory` to return `TransferInstructionResult_Completed` immediately. However, the utility `AllocationFactory` returns `TransferInstructionResult_Pending` for transfers (creating a transfer instruction that requires acceptance). This design difference means `MergeDelegation_Merge` cannot be used directly with the utility package — it would require a factory that completes transfers atomically.
 
 The script validates that MergeDelegation contracts exist (confirming the delegation relationship) but performs the actual merge via the two-step transfer mechanism.
 
@@ -414,7 +569,7 @@ The script validates that MergeDelegation contracts exist (confirming the delega
 
 ### Merged Output File
 
-`farming-wallet-merged-holdings.json`:
+`user-wallet-merged-holdings-cbtc.json`:
 
 ```json
 {
@@ -424,9 +579,9 @@ The script validates that MergeDelegation contracts exist (confirming the delega
   "totalHoldings": 25,
   "wallets": [
     {
-      "partyHint": "farming-wallet-01",
-      "partyId": "farming-wallet-01::1220...",
-      "userId": "farming-wallet-01-user",
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
       "holdings": [
         { "contractId": "00...", "amount": 8452 }
       ],
@@ -438,7 +593,354 @@ The script validates that MergeDelegation contracts exist (confirming the delega
 
 ### Balance Verification
 
-After merging, the script compares each wallet's `totalAmount` in `farming-wallet-merged-holdings.json` with the corresponding `totalAmount` in `farming-wallet-holdings.json`. Any mismatch is reported as an error. The verification handles decimal vs integer comparison (ledger amounts may include `.0` suffix).
+After merging, the script compares each wallet's `totalAmount` in `user-wallet-merged-holdings-cbtc.json` with the corresponding `totalAmount` in `user-wallet-holdings-cbtc.json`. Any mismatch is reported as an error. The verification handles decimal vs integer comparison (ledger amounts may include `.0` suffix).
+
+---
+
+## Script 6: `06-user-wallet-utxo-merging-amulet.sh`
+
+Merges all Amulet (CC) holdings for each user wallet into a single Amulet per wallet, then verifies that balances are preserved.
+
+### Usage
+
+```bash
+# Requires: 03-request-faucet-amulet.sh + 04-create-merge-delegation.sh completed
+./06-user-wallet-utxo-merging-amulet.sh
+```
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Loads config, keypairs, delegation data, original holdings; generates JWTs for app-user and SV; gets synchronizer; resolves DSO party |
+| 1 | Fetch SV contracts | Fetches `ExternalPartyAmuletRules` + `AmuletRules` + `OpenMiningRound` from SV participant with blobs for use as disclosed contracts (3 contracts total) |
+| 2 | Merge holdings | For each wallet: validates MergeDelegation exists, queries Amulet holdings, performs two-step self-transfer merge |
+| 3 | Write report | Writes `user-wallet-merged-holdings-amulet.json` with one Amulet per wallet |
+| 4 | Verify balances | Compares merged totals with original `user-wallet-holdings-amulet.json` totals |
+
+### Two-Step Self-Transfer Merge (Amulet)
+
+The merge uses `ExternalPartyAmuletRules` which implements the `TransferFactory` interface. For each wallet with multiple holdings:
+
+1. **Exercise `TransferFactory_Transfer`** on the `ExternalPartyAmuletRules` contract (self-transfer: sender = receiver = wallet):
+   - Interface: `Splice.Api.Token.TransferInstructionV1:TransferFactory` (exercised via `templateId` field)
+   - Contract: `ExternalPartyAmuletRules` (`#splice-amulet:Splice.ExternalPartyAmuletRules:ExternalPartyAmuletRules`)
+   - Disclosed contracts: ExternalPartyAmuletRules + AmuletRules + OpenMiningRound (all 3 required)
+   - ExtraArgs context: `amulet-rules` (CID) + `open-round` (CID) -- required by Amulet payment context
+   - `inputHoldingCids`: all existing Amulet CIDs for the wallet
+   - `amount`: total of all holdings
+   - Returns: a pending `TransferInstruction`
+   - Submitted via **interactive submission** (wallet signs)
+
+2. **Exercise `TransferInstruction_Accept`** on the pending instruction:
+   - ExtraArgs context: same `amulet-rules` + `open-round`
+   - Archives all input Amulets + the instruction
+   - Creates a single merged `Amulet`
+   - Submitted via **interactive submission** (wallet signs)
+
+> **Note**: Like the CBTC `AllocationFactory`, the `ExternalPartyAmuletRules` is a single contract implementing multiple Splice token standard interfaces including `TransferFactory` and `AllocationFactory`. The `TransferFactory_Transfer` interface choice is exercised directly on the `ExternalPartyAmuletRules` contract.
+
+### Differences from CBTC Merging (Script 5)
+
+| Aspect | CBTC (Script 5) | Amulet (Script 6) |
+|--------|-----------------|-------------------|
+| Factory contract | `AllocationFactory` (from `cbtc-factories.json`) | `ExternalPartyAmuletRules` (fetched live from SV) |
+| Disclosed contracts | 2 (AllocationFactory + InstrumentConfiguration) | 3 (ExternalPartyAmuletRules + AmuletRules + OpenMiningRound) |
+| ExtraArgs context | `instrument-configuration` + credentials | `amulet-rules` + `open-round` |
+| Amount field | `createArgument.amount` | `createArgument.amount.initialAmount` (ExpiringAmount) |
+| Admin party | CBTC-NETWORK | DSO |
+
+### Balance Verification
+
+After merging, the script compares each wallet's `totalAmount` in `user-wallet-merged-holdings-amulet.json` with the corresponding `totalAmount` in `user-wallet-holdings-amulet.json`. Small differences may occur for Amulet tokens due to holding fees (ExpiringAmount).
+
+### Merged Output File
+
+`user-wallet-merged-holdings-amulet.json`:
+
+```json
+{
+  "generatedAt": "2026-02-11T...",
+  "dsoParty": "DSO::1220...",
+  "tokenId": "Amulet",
+  "totalHoldings": 25,
+  "wallets": [
+    {
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
+      "holdings": [
+        { "contractId": "00...", "amount": 11234 }
+      ],
+      "totalAmount": 11234
+    }
+  ]
+}
+```
+
+---
+
+## Scripts 07-10: Query-then-Merge Workflow
+
+Scripts 05 and 06 query holdings **live** from the ledger and merge them in a single run. Scripts 07-10 split this into separate phases:
+
+1. **Query phase** (07, 08): Query current holdings from the ledger and write them to JSON files.
+2. **Merge phase** (09, 10): Read holdings from the JSON files and merge them.
+
+This separation is useful when you want to inspect or modify the holdings data between querying and merging, or when re-running merges after a partial failure without re-querying the ledger.
+
+### Prerequisites
+
+Scripts 07-10 require:
+- `01-generate-user-wallet.sh` completed (keypairs exist)
+- `04-create-merge-delegation.sh` completed (MergeDelegation contracts exist) -- for scripts 09/10
+- Holdings exist on the ledger (from scripts 02/03 or previous operations)
+- `cbtc-factories.json` present in `../setup-exchange/` -- for script 09
+
+---
+
+## Script 7: `07-query-holdings-cbtc.sh`
+
+Queries all active CBTC `Holding` contracts for each user wallet from the ledger and writes a JSON report.
+
+### Usage
+
+```bash
+# Requires: 01-generate-user-wallet.sh + holdings exist on ledger
+./07-query-holdings-cbtc.sh
+```
+
+### Configuration
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `NUM_WALLETS` | `user-wallet-keypairs.json` | Automatically determined from keypairs file |
+
+No configurable parameters — the script processes all wallets found in the keypairs file.
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources `../setup-exchange/.env`, loads CBTC config + CBTC-NETWORK keypair, generates JWT |
+| 1 | Query holdings | For each wallet: queries active contracts matching the `Holding` template, extracts contract IDs and amounts |
+| 2 | Write report | Writes `user-wallet-holdings-cbtc.json` with per-wallet holdings and totals |
+
+### Ledger Query Details
+
+- **Template**: `#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding`
+- **Endpoint**: `GET /v2/state/active-contracts` on the app-user JSON API (port 2975)
+- **Amount field**: `createArgument.amount` (string, e.g. `"267.0000000000"`)
+- Queries use `verbose: true` and `includeCreatedEventBlob: false`
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-holdings-cbtc.json` | Per-wallet CBTC holdings with contract IDs, amounts, and totals |
+
+#### `user-wallet-holdings-cbtc.json` format
+
+```json
+{
+  "generatedAt": "2026-02-11T...",
+  "cbtcNetworkParty": "CBTC-NETWORK::1220...",
+  "tokenId": "CBTC",
+  "templateId": "#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding",
+  "totalHoldings": 500,
+  "wallets": [
+    {
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
+      "holdings": [
+        { "contractId": "00...", "amount": 423 },
+        { "contractId": "00...", "amount": 781 }
+      ],
+      "totalAmount": 8452
+    }
+  ]
+}
+```
+
+---
+
+## Script 8: `08-query-holdings-amulet.sh`
+
+Queries all active Amulet (CC) contracts for each user wallet from the ledger and writes a JSON report.
+
+### Usage
+
+```bash
+# Requires: 01-generate-user-wallet.sh + holdings exist on ledger (DevNet mode)
+./08-query-holdings-amulet.sh
+```
+
+### Configuration
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `NUM_WALLETS` | `user-wallet-keypairs.json` | Automatically determined from keypairs file |
+
+No configurable parameters — the script processes all wallets found in the keypairs file.
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources `../setup-exchange/.env`, generates JWT, resolves DSO party ID via scan-proxy |
+| 1 | Query holdings | For each wallet: queries active contracts matching the `Amulet` template, extracts contract IDs and amounts |
+| 2 | Write report | Writes `user-wallet-holdings-amulet.json` with per-wallet holdings and totals |
+
+### Ledger Query Details
+
+- **Template**: `#splice-amulet:Splice.Amulet:Amulet`
+- **Endpoint**: `GET /v2/state/active-contracts` on the app-user JSON API (port 2975)
+- **Amount field**: `createArgument.amount.initialAmount` (Amulet uses `ExpiringAmount` — the amount is nested under `.amount.initialAmount`, not a flat `.amount`)
+- Queries use `verbose: true` and `includeCreatedEventBlob: false`
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-holdings-amulet.json` | Per-wallet Amulet holdings with contract IDs, amounts, and totals |
+
+#### `user-wallet-holdings-amulet.json` format
+
+```json
+{
+  "generatedAt": "2026-02-11T...",
+  "dsoParty": "DSO::1220...",
+  "tokenId": "Amulet",
+  "templateId": "#splice-amulet:Splice.Amulet:Amulet",
+  "totalHoldings": 500,
+  "wallets": [
+    {
+      "partyHint": "user-wallet-01",
+      "partyId": "user-wallet-01::1220...",
+      "userId": "user-wallet-01-user",
+      "holdings": [
+        { "contractId": "00...", "amount": 547 },
+        { "contractId": "00...", "amount": 312 }
+      ],
+      "totalAmount": 11234
+    }
+  ]
+}
+```
+
+---
+
+## Script 9: `09-merge-holdings-cbtc.sh`
+
+Merges CBTC holdings for each user wallet using pre-queried JSON input (from script 07). Same merge logic as script 05, but reads holdings from a JSON file instead of querying the ledger live.
+
+### Usage
+
+```bash
+# Requires: 07-query-holdings-cbtc.sh + 04-create-merge-delegation.sh completed
+./09-merge-holdings-cbtc.sh
+```
+
+### Configuration
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `NUM_WALLETS` | `user-wallet-keypairs.json` | Automatically determined from keypairs file |
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources configs, loads AllocationFactory + InstrumentConfiguration from `cbtc-factories.json`, builds disclosed contracts, generates JWT, gets synchronizer |
+| 1 | Merge holdings | For each wallet: reads holdings from `user-wallet-holdings-cbtc.json`, validates MergeDelegation exists, performs two-step self-transfer merge via AllocationFactory |
+| 2 | Write report | Writes `user-wallet-merged-holdings-cbtc.json` with one holding per wallet |
+| 3 | Verify balances | Compares merged totals with original JSON input totals (integer comparison) |
+
+### Key Difference from Script 05
+
+| Aspect | Script 05 (live query) | Script 09 (JSON input) |
+|--------|------------------------|------------------------|
+| Holdings source | Queries ledger live per wallet | Reads from `user-wallet-holdings-cbtc.json` (script 07 output) |
+| Prerequisite | Holdings on ledger | `07-query-holdings-cbtc.sh` run |
+| Re-run behavior | Always gets latest holdings | Uses snapshot from last query |
+
+The merge mechanism is identical: `TransferFactory_Transfer` → `TransferInstruction_Accept` on the `AllocationFactory` contract via the `TransferFactory` interface, using interactive submission.
+
+### Input Files
+
+| File | Produced by | Description |
+|------|-------------|-------------|
+| `user-wallet-holdings-cbtc.json` | Script 07 | Per-wallet CBTC holdings (contract IDs and amounts) |
+| `cbtc-factories.json` | `setup-exchange/03-register-cbtc-token.sh` | AllocationFactory + InstrumentConfiguration contract IDs and disclosures |
+| `user-wallet-merge-delegation.json` | Script 04 | MergeDelegation contract IDs (validated but not exercised) |
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-merged-holdings-cbtc.json` | One merged holding per wallet with contract ID and total amount |
+
+### Balance Verification
+
+After merging, the script compares each wallet's `totalAmount` in the merged output with the corresponding `totalAmount` in the input JSON. Comparison uses integer truncation to handle decimal formatting differences (e.g. `1151` vs `1151.0000000000`).
+
+---
+
+## Script 10: `10-merge-holdings-amulet.sh`
+
+Merges Amulet (CC) holdings for each user wallet using pre-queried JSON input (from script 08). Same merge logic as script 06, but reads holdings from a JSON file instead of querying the ledger live.
+
+### Usage
+
+```bash
+# Requires: 08-query-holdings-amulet.sh + 04-create-merge-delegation.sh completed
+./10-merge-holdings-amulet.sh
+```
+
+### Configuration
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `NUM_WALLETS` | `user-wallet-keypairs.json` | Automatically determined from keypairs file |
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 0 | Pre-flight | Sources configs, generates JWTs for app-user and SV, gets synchronizer, resolves DSO party |
+| 1 | Fetch SV contracts | Fetches `ExternalPartyAmuletRules` + `AmuletRules` + `OpenMiningRound` from SV participant with blobs for use as disclosed contracts (3 contracts total) |
+| 2 | Merge holdings | For each wallet: reads holdings from `user-wallet-holdings-amulet.json`, validates MergeDelegation exists, performs two-step self-transfer merge via ExternalPartyAmuletRules |
+| 3 | Write report | Writes `user-wallet-merged-holdings-amulet.json` with one Amulet per wallet |
+| 4 | Verify balances | Compares merged totals with original JSON input totals (integer comparison) |
+
+### Key Difference from Script 06
+
+| Aspect | Script 06 (live query) | Script 10 (JSON input) |
+|--------|------------------------|------------------------|
+| Holdings source | Queries ledger live per wallet | Reads from `user-wallet-holdings-amulet.json` (script 08 output) |
+| SV contracts | Fetched live (same) | Fetched live (same) |
+| Prerequisite | Holdings on ledger | `08-query-holdings-amulet.sh` run |
+| Re-run behavior | Always gets latest holdings | Uses snapshot from last query |
+
+The merge mechanism is identical to script 06: `TransferFactory_Transfer` → `TransferInstruction_Accept` on the `ExternalPartyAmuletRules` contract via the `TransferFactory` interface. SV contracts (ExternalPartyAmuletRules, AmuletRules, OpenMiningRound) are always fetched live since they may change between rounds.
+
+### Input Files
+
+| File | Produced by | Description |
+|------|-------------|-------------|
+| `user-wallet-holdings-amulet.json` | Script 08 | Per-wallet Amulet holdings (contract IDs and amounts) |
+| `user-wallet-merge-delegation.json` | Script 04 | MergeDelegation contract IDs (validated but not exercised) |
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `user-wallet-merged-holdings-amulet.json` | One merged Amulet per wallet with contract ID and total amount |
+
+### Balance Verification
+
+After merging, the script compares each wallet's `totalAmount` in the merged output with the corresponding `totalAmount` in the input JSON. Small differences may occur for Amulet tokens due to holding fees (`ExpiringAmount`).
 
 ---
 
@@ -485,7 +987,7 @@ All scripts use NaCl/TweetNaCl format Ed25519 keypairs generated by `@canton-net
 
 **External party allocation fails**: The Canton participant must support external parties (Canton 3.4.10+). Verify the quickstart is fully up with `docker ps`.
 
-**Interactive submission fails with "INVALID_ARGUMENT"**: The external party's public key may not match the one registered during topology generation. If you regenerated keys, delete `farming-wallet-keypairs.json` and re-run.
+**Interactive submission fails with "INVALID_ARGUMENT"**: The external party's public key may not match the one registered during topology generation. If you regenerated keys, delete `user-wallet-keypairs.json` and re-run.
 
 **MergeDelegation proposal creation fails with "PACKAGE_NOT_FOUND"**: The `splice-util-token-standard-wallet` package may not be uploaded to the participant. This package is normally available as part of the Splice infrastructure. Verify by checking uploaded packages:
 
@@ -495,6 +997,6 @@ curl -s http://localhost:2975/v2/packages -H "Authorization: Bearer <token>" | j
 
 **"EXECUTOR_PARTY_ID not found"**: Run `01-setup-exchange.sh` first to generate the backend `.env` file with resolved party IDs.
 
-**Re-running after failure**: Steps 1-3 of `generate-farming-wallets.sh` are idempotent (keypairs, parties, users). However, Steps 4-5 (minting) are NOT idempotent. If the script fails partway through minting, you may need to clean up manually or start fresh by deleting the output files and re-running.
+**Re-running after failure**: Steps 1-3 of `01-generate-user-wallet.sh` are idempotent (keypairs, parties, users). However, Steps 4-5 (minting) are NOT idempotent. If the script fails partway through minting, you may need to clean up manually or start fresh by deleting the output files and re-running.
 
 **Script takes too long**: Generating 500 mint requests and 500 accept transactions involves 1000 interactive submissions. Each requires a prepare-sign-execute round trip. Expect the script to take several minutes depending on network latency.
