@@ -228,6 +228,140 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
 
 ---
 
+## MergeDelegation Smart Contract Workflow
+
+The MergeDelegation system enables an **operator** (the exchange backend's executor party) to merge token holdings on behalf of **owners** (farming wallet external parties). This section describes the Daml templates, their lifecycle, and how the scripts use them.
+
+### Templates Overview
+
+The workflow involves three Daml templates from `splice-util-token-standard-wallet`:
+
+| Template | Signatories | Purpose |
+|----------|-------------|---------|
+| `MergeDelegationProposal` | `owner` | Proposal to delegate merge authority to an operator |
+| `MergeDelegation` | `owner`, `operator` | Active delegation granting the operator merge rights |
+| `BatchMergeUtility` | `operator` | Utility for batch-processing multiple merge delegations |
+
+### Template Fields
+
+**MergeDelegationProposal**:
+
+- `delegation` — nested record containing `operator` (Party), `owner` (Party), `meta` (Metadata)
+- Signatory: `delegation.owner`
+- Observer: `delegation.operator`
+
+**MergeDelegation**:
+
+- `operator` (Party) — the party authorized to merge holdings
+- `owner` (Party) — the party whose holdings can be merged
+- `meta` (Metadata) — arbitrary metadata (`{ values: {} }`)
+- Signatories: both `operator` and `owner`
+
+**BatchMergeUtility**:
+- `operator` (Party) — the batch processor
+- `changeHoldings` (Map InstrumentId ContractId) — tracks change holdings between merge calls
+- Signatory: `operator`
+
+### Choices
+
+**MergeDelegationProposal** choices:
+
+| Choice | Controller | Effect |
+|--------|-----------|--------|
+| `MergeDelegationProposal_Accept` | `delegation.operator` | Consumes proposal, creates `MergeDelegation` |
+| `MergeDelegationProposal_Reject` | `delegation.operator` | Consumes proposal (rejects) |
+| `MergeDelegationProposal_Withdraw` | `delegation.owner` | Consumes proposal (owner withdraws) |
+
+**MergeDelegation** choices:
+
+| Choice | Controller | Consuming | Effect |
+|--------|-----------|-----------|--------|
+| `MergeDelegation_Merge` | `operator` | No | Merges owner's holdings via a TransferFactory self-transfer |
+| `MergeDelegation_Reject` | `operator` | Yes | Operator terminates the delegation |
+| `MergeDelegation_Withdraw` | `owner` | Yes | Owner revokes the delegation |
+
+**MergeDelegation_Merge** parameters:
+
+- `selfTransfer` (Optional TransferFactoryView) — the TransferFactory to use for self-transfer (with disclosed contract)
+- `extraTransfer` (Optional TransferFactoryView) — optional second factory for additional transfers
+- `featuredAppRight` (Optional ContractId) — optional FeaturedAppRight for fee discount
+
+### Lifecycle Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Owner as Owner<br/>(Farming Wallet)
+    participant Ledger as Canton Ledger
+    participant Operator as Operator<br/>(Exchange Backend)
+
+    Note over Owner,Operator: Phase 1: Delegation Setup (create-merge-delegations.sh)
+
+    Owner->>Ledger: Create MergeDelegationProposal<br/>{operator, owner, meta}
+    Note right of Owner: Interactive submission<br/>(external party signing)
+    Ledger-->>Operator: MergeDelegationProposal visible<br/>(operator is observer)
+    Operator->>Ledger: Exercise MergeDelegationProposal_Accept
+    Note right of Operator: Regular submission<br/>(participant-hosted party)
+    Ledger-->>Ledger: Archive Proposal → Create MergeDelegation
+    Ledger-->>Owner: MergeDelegation active<br/>(both are signatories)
+    Ledger-->>Operator: MergeDelegation active
+
+    Note over Owner,Operator: Phase 2: Holding Merge (farming-wallet-utxo-merging.sh)
+
+    Operator->>Ledger: Query MergeDelegation<br/>for wallet
+    Ledger-->>Operator: MergeDelegation confirmed
+
+    Operator->>Ledger: Query TokenHoldings<br/>for wallet party
+    Ledger-->>Operator: N holdings<br/>[H1, H2, ..., HN]
+
+    alt N > 1 (multiple holdings — merge needed)
+        Note over Owner,Operator: Step A: Self-Transfer via TransferFactory
+
+        Owner->>Ledger: Exercise TransferFactory_Transfer<br/>{sender=owner, receiver=owner,<br/>inputHoldingCids=[H1..HN],<br/>amount=total}
+        Note right of Owner: Interactive submission<br/>Factory passed as disclosed contract
+        Ledger-->>Ledger: Create TokenTransferInstruction<br/>(pending — requires acceptance)
+        Ledger-->>Owner: TransferInstruction created
+
+        Note over Owner,Operator: Step B: Accept Transfer Instruction
+
+        Owner->>Ledger: Exercise TransferInstruction_Accept
+        Note right of Owner: Interactive submission
+        Ledger-->>Ledger: Archive all input holdings<br/>Archive TransferInstruction<br/>Create single TokenHolding<br/>(amount = sum of all inputs)
+        Ledger-->>Owner: Merged TokenHolding created
+    else N = 1 (single holding — already merged)
+        Note over Owner,Operator: Skip — wallet already has one holding
+    end
+
+    Note over Owner,Operator: Phase 3: Verification
+
+    Operator->>Operator: Compare merged totalAmount<br/>with original totalAmount
+    Note right of Operator: Ensures no value lost during merge
+```
+
+### Why Two-Step Transfer Instead of MergeDelegation_Merge?
+
+The `MergeDelegation_Merge` choice is designed to execute a self-transfer through a `TransferFactory` and expects the factory to return `TransferInstructionResult_Completed` — meaning the merge completes in a single atomic transaction.
+
+However, the **fungible token** `TokenTransferFactory` always returns `TransferInstructionResult_Pending` for self-transfers, creating a `TokenTransferInstruction` that requires a separate `TransferInstruction_Accept` step. This two-step behavior is a design characteristic of fungible tokens (as opposed to Amulet tokens, where self-transfers complete immediately).
+
+Because of this incompatibility:
+
+1. The scripts **create MergeDelegation contracts** to establish the delegation relationship and prove the operator is authorized to act on behalf of the owner.
+2. The scripts **perform the actual merge** using the two-step `TransferFactory_Transfer` → `TransferInstruction_Accept` mechanism directly, bypassing `MergeDelegation_Merge`.
+
+This approach works correctly with fungible tokens while still maintaining the delegation authorization model.
+
+### BatchMergeUtility (Advanced)
+
+For production use cases with many wallets and multiple token types, the `BatchMergeUtility` template provides batch processing:
+
+1. **Operator creates** `BatchMergeUtility` with initial `changeHoldings` map
+2. **Exercise `BatchMergeUtility_Call`** for each `MergeDelegation` — processes one owner's merge and threads the updated `changeHoldings` to the next call
+3. **Exercise `BatchMergeUtility_Close`** when done — archives the utility and returns final change holdings
+
+This pattern is optimized for Amulet tokens where `MergeDelegation_Merge` returns `Completed` results. It is not used by these scripts since fungible tokens require the two-step flow.
+
+---
+
 ## Script 3: `farming-wallet-utxo-merging.sh`
 
 Merges all CBTC token holdings for each farming wallet into a single holding per wallet, then verifies that balances are preserved.
