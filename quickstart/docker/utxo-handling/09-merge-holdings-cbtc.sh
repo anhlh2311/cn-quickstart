@@ -2,19 +2,19 @@
 # Merges CBTC token holdings for each user wallet into a single Holding per wallet.
 #
 # Reads holdings from user-wallet-holdings-cbtc.json (produced by 07-query-holdings-cbtc.sh)
-# and uses the Utility package's AllocationFactory (TransferFactory interface) to perform
-# a self-transfer merge: all holdings of a wallet are combined into one.
+# and uses MergeDelegation_Merge to exercise a self-transfer via the Utility package's
+# AllocationFactory (TransferFactory interface). The operator submits via regular submission.
 #
 # For each wallet with >1 holding:
 #   1. Validates that a MergeDelegation contract exists
-#   2. Exercises TransferFactory_Transfer (self-transfer with all input holdings)
-#   3. If a TransferInstruction is created, exercises TransferInstruction_Accept
-#   4. Records the merged Holding
+#   2. Exercises MergeDelegation_Merge (operator submits, single regular submission)
+#   3. Records the merged Holding
 #
 # Prerequisites:
 #   - quickstart must be running
 #   - 07-query-holdings-cbtc.sh must have been run (creates user-wallet-holdings-cbtc.json)
 #   - 03-register-cbtc-token.sh (setup-exchange) must have been run (creates cbtc-factories.json)
+#   - 02-register-featured-app-right.sh must have been run (creates featured-app-right.json)
 #   - 04-create-merge-delegation.sh must have been run (MergeDelegation contracts)
 #
 # Usage: ./09-merge-holdings-cbtc.sh
@@ -60,6 +60,18 @@ if [ ! -f "$CBTC_KEYPAIR_FILE" ]; then
   exit 1
 fi
 CBTC_NETWORK_PARTY=$(jq -r '.partyId' "$CBTC_KEYPAIR_FILE")
+
+# Get OPERATOR_PARTY (executor) from backend .env
+BACKEND_ENV="$EXCHANGE_BACKEND_DIR/.env"
+if [ ! -f "$BACKEND_ENV" ]; then
+  echo "[merge-cbtc] ERROR: Backend .env not found: $BACKEND_ENV" >&2
+  exit 1
+fi
+OPERATOR_PARTY=$(grep -E '^EXECUTOR_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
+if [ -z "$OPERATOR_PARTY" ]; then
+  echo "[merge-cbtc] ERROR: EXECUTOR_PARTY_ID not found in $BACKEND_ENV" >&2
+  exit 1
+fi
 
 # Load user wallet data
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
@@ -111,16 +123,31 @@ DISCLOSED_CONTRACTS=$(jq -c '[
   }
 ]' "$FACTORIES_FILE")
 
-# Template IDs (utility packages)
-ALLOCATION_FACTORY_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory"
-TRANSFER_OFFER_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Model.Transfer:TransferOffer"
+# Load FeaturedAppRight from featured-app-right.json
+FAR_FILE="$SETUP_DIR/featured-app-right.json"
+if [ ! -f "$FAR_FILE" ]; then
+  echo "[merge-cbtc] ERROR: FeaturedAppRight file not found: $FAR_FILE" >&2
+  echo "[merge-cbtc] Run 02-register-featured-app-right.sh first." >&2
+  exit 1
+fi
+
+FAR_CID=$(jq -r '.featuredAppRight.contractId // empty' "$FAR_FILE")
+if [ -z "$FAR_CID" ] || [ "$FAR_CID" = "null" ]; then
+  echo "[merge-cbtc] ERROR: FeaturedAppRight contractId not found in $FAR_FILE" >&2
+  exit 1
+fi
+
+# Add FeaturedAppRight to disclosed contracts
+DISCLOSED_CONTRACTS=$(echo "$DISCLOSED_CONTRACTS" | jq -c \
+  --arg cid "$(jq -r '.featuredAppRight.disclosure.contractId' "$FAR_FILE")" \
+  --arg tmpl "$(jq -r '.featuredAppRight.disclosure.templateId' "$FAR_FILE")" \
+  --arg blob "$(jq -r '.featuredAppRight.disclosure.createdEventBlob' "$FAR_FILE")" \
+  --arg sync "$(jq -r '.featuredAppRight.disclosure.synchronizerId' "$FAR_FILE")" \
+  '. + [{ contractId: $cid, templateId: $tmpl, createdEventBlob: $blob, synchronizerId: $sync }]')
+
+# Template IDs
 HOLDING_TEMPLATE="#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding"
 DELEGATION_TEMPLATE="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation"
-
-# Interface IDs (Splice standard — for exercising interface choices, put in templateId field)
-# Canton JSON API v2 interactive-submission/prepare requires interface ID in templateId, NOT in interfaceId
-TRANSFER_FACTORY_INTERFACE="55ba4deb0ad4662c4168b39859738a0e91388d252286480c7331b3f71a517281:Splice.Api.Token.TransferInstructionV1:TransferFactory"
-TRANSFER_INSTRUCTION_INTERFACE="55ba4deb0ad4662c4168b39859738a0e91388d252286480c7331b3f71a517281:Splice.Api.Token.TransferInstructionV1:TransferInstruction"
 
 # Output file
 MERGED_HOLDINGS_FILE="$SCRIPT_DIR/user-wallet-merged-holdings-cbtc.json"
@@ -189,146 +216,39 @@ generate_canton_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
-# Interactive submission: prepare -> sign -> execute (with retry for transient errors)
-# Uses temp files to avoid shell variable corruption with large base64 payloads.
-interactive_submit() {
-  local commands_json="$1"
-  local act_as_party="$2"
-  local private_key="$3"
-  local fingerprint="$4"
-  local cmd_id_prefix="$5"
-  local disclosed_json="${6:-[]}"
-  local json_api="${7:-$APP_USER_JSON_API}"
-  local auth_token="${8:-$CANTON_TOKEN}"
-  local user_id="${9:-$SHARED_SECRET_USER}"
+# Regular submission for participant-hosted parties (operator)
+regular_submit() {
+  local party="$1"
+  local read_as="$2"
+  local command_json="$3"
+  local cmd_id_prefix="$4"
+  local disclosed_json="${5:-[]}"
 
-  local tmp_prepare="/tmp/canton-is-prepare-$$-${RANDOM}.json"
-  local tmp_execute_body="/tmp/canton-is-exec-body-$$-${RANDOM}.json"
-  local tmp_execute_resp="/tmp/canton-is-exec-resp-$$-${RANDOM}.json"
+  local cmd_id="${cmd_id_prefix}-${RUN_ID}-${RANDOM}${RANDOM}"
 
-  local attempt
-  for attempt in 1 2 3; do
-    local cmd_id="${cmd_id_prefix}-${RUN_ID}-${RANDOM}${RANDOM}"
-
-    local prepare_body
-    prepare_body=$(jq -n \
-      --argjson commands "$commands_json" \
-      --arg cmdId "$cmd_id" \
-      --arg userId "$user_id" \
-      --arg syncId "$SYNCHRONIZER_ID" \
-      --arg party "$act_as_party" \
-      --argjson disclosed "$disclosed_json" \
-      '{
+  local submit_body
+  submit_body=$(jq -n \
+    --arg party "$party" \
+    --arg readAs "$read_as" \
+    --arg cmdId "$cmd_id" \
+    --arg userId "$SHARED_SECRET_USER" \
+    --argjson commands "$command_json" \
+    --argjson disclosed "$disclosed_json" \
+    '{
+      commands: {
         commands: $commands,
         commandId: $cmdId,
         userId: $userId,
         actAs: [$party],
-        readAs: [],
+        readAs: [$readAs],
         disclosedContracts: $disclosed,
-        synchronizerId: $syncId,
-        verboseHashing: true,
+        deduplicationPeriod: {Empty: {}},
         packageIdSelectionPreference: []
-      }')
+      }
+    }')
 
-    local prepare_http
-    prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
-      "$json_api/v2/interactive-submission/prepare" \
-      -H "Authorization: Bearer $auth_token" \
-      -H "Content-Type: application/json" \
-      --data-raw "$prepare_body")
-
-    if [ "$prepare_http" = "503" ] || [ "$prepare_http" = "429" ] || [ "$prepare_http" = "409" ]; then
-      log "  (prepare returned $prepare_http, attempt $attempt/3, retrying in 3s...)" >&2
-      sleep 3
-      continue
-    fi
-
-    if [ "$prepare_http" != "200" ] && [ "$prepare_http" != "201" ]; then
-      log_error "Prepare failed with HTTP $prepare_http"
-      log_error "Response: $(head -c 500 "$tmp_prepare" 2>/dev/null)"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    local prepared_hash
-    prepared_hash=$(jq -r '.preparedTransactionHash // empty' "$tmp_prepare")
-    local hashing_version
-    hashing_version=$(jq -r '.hashingSchemeVersion // empty' "$tmp_prepare")
-
-    if [ -z "$prepared_hash" ]; then
-      log_error "Prepare response missing preparedTransactionHash"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    local sig
-    sig=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
-      const { signTransactionHash } = require('@canton-network/core-signing-lib');
-      const signature = signTransactionHash('$prepared_hash', '$private_key');
-      process.stdout.write(signature);
-    " 2>/dev/null) || sig=""
-
-    if [ -z "$sig" ]; then
-      log_error "Failed to sign prepared transaction"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    jq -n \
-      --arg userId "$user_id" \
-      --arg submissionId "merge-cbtc-${cmd_id}" \
-      --arg preparedTx "$(jq -r '.preparedTransaction' "$tmp_prepare")" \
-      --arg hashVersion "$hashing_version" \
-      --arg party "$act_as_party" \
-      --arg sig "$sig" \
-      --arg signedBy "$fingerprint" \
-      '{
-        userId: $userId,
-        submissionId: $submissionId,
-        preparedTransaction: $preparedTx,
-        hashingSchemeVersion: $hashVersion,
-        partySignatures: {
-          signatures: [{
-            party: $party,
-            signatures: [{
-              signature: $sig,
-              signedBy: $signedBy,
-              format: "SIGNATURE_FORMAT_RAW",
-              signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"
-            }]
-          }]
-        },
-        deduplicationPeriod: {Empty: {}}
-      }' > "$tmp_execute_body"
-
-    local execute_http
-    execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
-      "$json_api/v2/interactive-submission/executeAndWaitForTransaction" \
-      -H "Authorization: Bearer $auth_token" \
-      -H "Content-Type: application/json" \
-      -d @"$tmp_execute_body")
-
-    if [ "$execute_http" = "503" ] || [ "$execute_http" = "429" ] || [ "$execute_http" = "409" ]; then
-      log "  (execute returned $execute_http, attempt $attempt/3, retrying in 3s...)" >&2
-      sleep 3
-      continue
-    fi
-
-    if [ "$execute_http" != "200" ] && [ "$execute_http" != "201" ]; then
-      log_error "Execute failed with HTTP $execute_http"
-      log_error "Response: $(head -c 500 "$tmp_execute_resp" 2>/dev/null)"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    cat "$tmp_execute_resp"
-    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-    return 0
-  done
-
-  log_error "All 3 attempts failed for $cmd_id_prefix"
-  rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-  return 1
+  curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+    --data-raw "$submit_body" || return 1
 }
 
 # Query active contracts for MergeDelegation check
@@ -382,21 +302,13 @@ log "Merge CBTC Holdings (from JSON)"
 log "=========================================="
 log "  Wallets: $NUM_WALLETS"
 log "  Input file: $HOLDINGS_INPUT_FILE"
+log "  Operator: ${OPERATOR_PARTY:0:50}..."
 log "  CBTC-NETWORK: ${CBTC_NETWORK_PARTY:0:50}..."
-log "  AllocationFactory (as TransferFactory): ${FACTORY_CID:0:40}..."
-log "  InstrumentConfiguration: ${INSTRUMENT_CONFIG_CID:0:40}..."
+log "  AllocationFactory: ${FACTORY_CID:0:40}..."
+log "  FeaturedAppRight: ${FAR_CID:0:40}..."
 log ""
 
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
-
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
-  | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
-
-if [ -z "$SYNCHRONIZER_ID" ]; then
-  log_error "Could not get connected synchronizer"
-  exit 1
-fi
-log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
 
 ##############################################################################
 # Step 1: Merge holdings for each wallet (from JSON input)
@@ -427,8 +339,6 @@ MERGED_RESULTS=()
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
   WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
 
   log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT..."
 
@@ -469,10 +379,10 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
   log "    Total amount: $TOTAL_AMOUNT (from $HOLDING_COUNT holdings)"
 
-  # 1c. Exercise TransferFactory_Transfer (self-transfer) on AllocationFactory (via interface)
-  # NOTE: For interface choices, put the interface ID in templateId (Canton JSON API v2 requirement)
-  TRANSFER_CMD=$(jq -n \
-    --arg templateId "$TRANSFER_FACTORY_INTERFACE" \
+  # 1c. Exercise MergeDelegation_Merge (operator submits via regular submission)
+  MERGE_CMD=$(jq -n \
+    --arg delegTemplateId "$DELEGATION_TEMPLATE" \
+    --arg delegCid "$DELEG_CID" \
     --arg factoryCid "$FACTORY_CID" \
     --arg admin "$CBTC_NETWORK_PARTY" \
     --arg tokenId "$CBTC_TOKEN_ID" \
@@ -482,107 +392,67 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     --arg executeBefore "$EXPIRE_TIME" \
     --argjson holdingCids "$HOLDING_CIDS" \
     --arg icCid "$INSTRUMENT_CONFIG_CID" \
+    --arg farCid "$FAR_CID" \
+    --arg operator "$OPERATOR_PARTY" \
     '[{
       ExerciseCommand: {
-        templateId: $templateId,
-        contractId: $factoryCid,
-        choice: "TransferFactory_Transfer",
+        templateId: $delegTemplateId,
+        contractId: $delegCid,
+        choice: "MergeDelegation_Merge",
         choiceArgument: {
-          expectedAdmin: $admin,
-          transfer: {
-            sender: $party,
-            receiver: $party,
-            amount: $amount,
-            instrumentId: { admin: $admin, id: $tokenId },
-            requestedAt: $requestedAt,
-            executeBefore: $executeBefore,
-            inputHoldingCids: $holdingCids,
-            meta: { values: {} }
-          },
-          extraArgs: {
-            context: {
-              values: {
-                "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid },
-                "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
-                "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] }
+          optMergeTransfer: {
+            factoryCid: $factoryCid,
+            choiceArg: {
+              expectedAdmin: $admin,
+              transfer: {
+                sender: $party,
+                receiver: $party,
+                amount: $amount,
+                instrumentId: { admin: $admin, id: $tokenId },
+                requestedAt: $requestedAt,
+                executeBefore: $executeBefore,
+                inputHoldingCids: $holdingCids,
+                meta: { values: {} }
+              },
+              extraArgs: {
+                context: {
+                  values: {
+                    "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid },
+                    "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
+                    "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] }
+                  }
+                },
+                meta: { values: {} }
               }
-            },
-            meta: { values: {} }
+            }
+          },
+          optExtraTransfer: null,
+          optFeaturedAppRight: {
+            appRightCid: $farCid,
+            beneficiaries: [
+              { beneficiary: $operator, weight: "1.0" }
+            ]
           }
         }
       }
     }]')
 
-  TRANSFER_TX=$(interactive_submit "$TRANSFER_CMD" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-    "merge-transfer-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
-    log_error "TransferFactory_Transfer failed for $WALLET_HINT"
+  MERGE_TX=$(regular_submit "$OPERATOR_PARTY" "$WALLET_PARTY" "$MERGE_CMD" \
+    "merge-cbtc-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
+    log_error "MergeDelegation_Merge failed for $WALLET_HINT"
     exit 1
   }
 
-  # For self-transfers (sender==receiver), the utility code may directly produce a merged Holding
-  # without creating a TransferOffer. Check for both cases.
-  INSTRUCTION_CID=$(echo "$TRANSFER_TX" | jq -r '
+  # Extract the merged Holding CID from response
+  MERGED_CID=$(echo "$MERGE_TX" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty)
-     | select(.templateId | tostring | (contains("TransferOffer") or contains("TransferInstruction")))
-     | select(.templateId | tostring | contains("TransferFactory") | not)
+     | select(.templateId | tostring | contains("Holding:Holding") or contains("Holding.V0.Holding:Holding"))
      | .contractId][0] // empty
   ' 2>/dev/null || echo "")
 
-  if [ -n "$INSTRUCTION_CID" ] && [ "$INSTRUCTION_CID" != "null" ]; then
-    # Two-step: TransferOffer was created → need to accept it
-    log "    Transfer instruction created: ${INSTRUCTION_CID:0:30}..."
-
-    # 1d. Exercise TransferInstruction_Accept (completes merge)
-    # NOTE: For interface choices, put the interface ID in templateId (Canton JSON API v2 requirement)
-    ACCEPT_CMD=$(jq -n \
-      --arg templateId "$TRANSFER_INSTRUCTION_INTERFACE" \
-      --arg contractId "$INSTRUCTION_CID" \
-      --arg icCid "$INSTRUMENT_CONFIG_CID" \
-      '[{
-        ExerciseCommand: {
-          templateId: $templateId,
-          contractId: $contractId,
-          choice: "TransferInstruction_Accept",
-          choiceArgument: {
-            extraArgs: {
-              context: {
-                values: {
-                  "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid },
-                  "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
-                  "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] }
-                }
-              },
-              meta: { values: {} }
-            }
-          }
-        }
-      }]')
-
-    ACCEPT_TX=$(interactive_submit "$ACCEPT_CMD" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-      "merge-accept-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
-      log_error "TransferInstruction_Accept failed for $WALLET_HINT"
-      exit 1
-    }
-
-    # Extract the merged Holding CID from accept response
-    MERGED_CID=$(echo "$ACCEPT_TX" | jq -r '
-      [.transaction.events[] | (.CreatedEvent // .created // empty)
-       | select(.templateId | tostring | contains("Holding:Holding") or contains("Holding.V0.Holding:Holding"))
-       | .contractId][0] // empty
-    ' 2>/dev/null || echo "")
-  else
-    # Self-transfer optimization: Holding was directly created (no TransferOffer step)
-    log "    Self-transfer: merged directly (no TransferOffer step)"
-    MERGED_CID=$(echo "$TRANSFER_TX" | jq -r '
-      [.transaction.events[] | (.CreatedEvent // .created // empty)
-       | select(.templateId | tostring | contains("Holding:Holding") or contains("Holding.V0.Holding:Holding"))
-       | .contractId][0] // empty
-    ' 2>/dev/null || echo "")
-  fi
-
   if [ -z "$MERGED_CID" ]; then
     log_error "Could not extract merged Holding CID for $WALLET_HINT"
-    log_error "Events: $(echo "${ACCEPT_TX:-$TRANSFER_TX}" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | {templateId, contractId}]' 2>/dev/null | head -c 500)"
+    log_error "Events: $(echo "$MERGE_TX" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | {templateId, contractId}]' 2>/dev/null | head -c 500)"
     exit 1
   fi
 

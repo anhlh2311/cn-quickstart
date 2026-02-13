@@ -1,26 +1,28 @@
 #!/bin/bash
 # Merges Amulet (CC) holdings for each user wallet into a single Amulet per wallet.
 #
-# Uses ExternalPartyAmuletRules (which implements TransferFactory interface)
-# to perform a self-transfer merge: all Amulet holdings of a wallet are combined into one.
+# Uses MergeDelegation_Merge to exercise a self-transfer via ExternalPartyAmuletRules
+# (TransferFactory interface). The operator (executor party) submits the merge via
+# regular submission — no wallet private keys are needed.
 #
 # Steps:
 #   1. Fetches ExternalPartyAmuletRules + AmuletRules + OpenMiningRound from SV
-#   2. For each wallet:
+#   2. Loads FeaturedAppRight from featured-app-right.json
+#   3. For each wallet:
 #      a. Validates that a MergeDelegation contract exists
 #      b. Queries all active Amulet contracts
-#      c. Performs a self-transfer via TransferFactory_Transfer (on ExternalPartyAmuletRules)
-#      d. Accepts the transfer instruction via TransferInstruction_Accept
-#      e. Records the merged Amulet holding
-#   3. Writes user-wallet-merged-holdings-amulet.json
-#   4. Verifies balances match the original user-wallet-holdings-amulet.json
+#      c. Exercises MergeDelegation_Merge (operator submits, single regular submission)
+#      d. Records the merged Amulet holding
+#   4. Writes user-wallet-merged-holdings-amulet.json
+#   5. Verifies balances match the original user-wallet-holdings-amulet.json
 #
 # Prerequisites:
 #   - quickstart must be running (DevNet mode)
-#   - request-faucet-amulet.sh must have been run (creates user-wallet-holdings-amulet.json)
-#   - create-merge-delegation.sh must have been run (MergeDelegation contracts)
+#   - 02-register-featured-app-right.sh must have been run (creates featured-app-right.json)
+#   - 03-request-faucet-amulet.sh must have been run (holdings exist on ledger)
+#   - 04-create-merge-delegation.sh must have been run (MergeDelegation contracts)
 #
-# Usage: ./user-wallet-utxo-merging-amulet.sh
+# Usage: ./06-user-wallet-utxo-merging-amulet.sh
 
 set -eo pipefail
 
@@ -48,6 +50,18 @@ fi
 SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
 RUN_ID=$(date +%s%N 2>/dev/null || date +%s)
 
+# Get OPERATOR_PARTY (executor) from backend .env
+BACKEND_ENV="$EXCHANGE_BACKEND_DIR/.env"
+if [ ! -f "$BACKEND_ENV" ]; then
+  echo "[utxo-merge-amulet] ERROR: Backend .env not found: $BACKEND_ENV" >&2
+  exit 1
+fi
+OPERATOR_PARTY=$(grep -E '^EXECUTOR_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
+if [ -z "$OPERATOR_PARTY" ]; then
+  echo "[utxo-merge-amulet] ERROR: EXECUTOR_PARTY_ID not found in $BACKEND_ENV" >&2
+  exit 1
+fi
+
 # Load user wallet data
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
 DELEGATIONS_FILE="$SCRIPT_DIR/user-wallet-merge-delegation.json"
@@ -66,17 +80,26 @@ if [ "$NUM_WALLETS" -gt "$AVAILABLE_WALLETS" ]; then
   NUM_WALLETS="$AVAILABLE_WALLETS"
 fi
 
+# Load FeaturedAppRight from featured-app-right.json
+FAR_FILE="$SETUP_DIR/featured-app-right.json"
+if [ ! -f "$FAR_FILE" ]; then
+  echo "[utxo-merge-amulet] ERROR: FeaturedAppRight file not found: $FAR_FILE" >&2
+  echo "[utxo-merge-amulet] Run 02-register-featured-app-right.sh first." >&2
+  exit 1
+fi
+
+FAR_CID=$(jq -r '.featuredAppRight.contractId // empty' "$FAR_FILE")
+if [ -z "$FAR_CID" ] || [ "$FAR_CID" = "null" ]; then
+  echo "[utxo-merge-amulet] ERROR: FeaturedAppRight contractId not found in $FAR_FILE" >&2
+  exit 1
+fi
+
 # Template IDs
 EXTERNAL_PARTY_AMULET_RULES_TEMPLATE="#splice-amulet:Splice.ExternalPartyAmuletRules:ExternalPartyAmuletRules"
 AMULET_RULES_TEMPLATE="#splice-amulet:Splice.AmuletRules:AmuletRules"
 OPEN_MINING_ROUND_TEMPLATE="#splice-amulet:Splice.Round:OpenMiningRound"
 AMULET_TEMPLATE="#splice-amulet:Splice.Amulet:Amulet"
 DELEGATION_TEMPLATE="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation"
-
-# Interface IDs (Splice standard — for exercising interface choices, put in templateId field)
-# Canton JSON API v2 interactive-submission/prepare requires interface ID in templateId, NOT in interfaceId
-TRANSFER_FACTORY_INTERFACE="55ba4deb0ad4662c4168b39859738a0e91388d252286480c7331b3f71a517281:Splice.Api.Token.TransferInstructionV1:TransferFactory"
-TRANSFER_INSTRUCTION_INTERFACE="55ba4deb0ad4662c4168b39859738a0e91388d252286480c7331b3f71a517281:Splice.Api.Token.TransferInstructionV1:TransferInstruction"
 
 # Output file
 MERGED_HOLDINGS_FILE="$SCRIPT_DIR/user-wallet-merged-holdings-amulet.json"
@@ -145,146 +168,39 @@ generate_canton_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
-# Interactive submission: prepare -> sign -> execute (with retry for transient errors)
-# Uses temp files to avoid shell variable corruption with large base64 payloads.
-interactive_submit() {
-  local commands_json="$1"
-  local act_as_party="$2"
-  local private_key="$3"
-  local fingerprint="$4"
-  local cmd_id_prefix="$5"
-  local disclosed_json="${6:-[]}"
-  local json_api="${7:-$APP_USER_JSON_API}"
-  local auth_token="${8:-$CANTON_TOKEN}"
-  local user_id="${9:-$SHARED_SECRET_USER}"
+# Regular submission for participant-hosted parties (operator)
+regular_submit() {
+  local party="$1"
+  local read_as="$2"
+  local command_json="$3"
+  local cmd_id_prefix="$4"
+  local disclosed_json="${5:-[]}"
 
-  local tmp_prepare="/tmp/canton-is-prepare-$$-${RANDOM}.json"
-  local tmp_execute_body="/tmp/canton-is-exec-body-$$-${RANDOM}.json"
-  local tmp_execute_resp="/tmp/canton-is-exec-resp-$$-${RANDOM}.json"
+  local cmd_id="${cmd_id_prefix}-${RUN_ID}-${RANDOM}${RANDOM}"
 
-  local attempt
-  for attempt in 1 2 3; do
-    local cmd_id="${cmd_id_prefix}-${RUN_ID}-${RANDOM}${RANDOM}"
-
-    local prepare_body
-    prepare_body=$(jq -n \
-      --argjson commands "$commands_json" \
-      --arg cmdId "$cmd_id" \
-      --arg userId "$user_id" \
-      --arg syncId "$SYNCHRONIZER_ID" \
-      --arg party "$act_as_party" \
-      --argjson disclosed "$disclosed_json" \
-      '{
+  local submit_body
+  submit_body=$(jq -n \
+    --arg party "$party" \
+    --arg readAs "$read_as" \
+    --arg cmdId "$cmd_id" \
+    --arg userId "$SHARED_SECRET_USER" \
+    --argjson commands "$command_json" \
+    --argjson disclosed "$disclosed_json" \
+    '{
+      commands: {
         commands: $commands,
         commandId: $cmdId,
         userId: $userId,
         actAs: [$party],
-        readAs: [],
+        readAs: [$readAs],
         disclosedContracts: $disclosed,
-        synchronizerId: $syncId,
-        verboseHashing: true,
+        deduplicationPeriod: {Empty: {}},
         packageIdSelectionPreference: []
-      }')
+      }
+    }')
 
-    local prepare_http
-    prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
-      "$json_api/v2/interactive-submission/prepare" \
-      -H "Authorization: Bearer $auth_token" \
-      -H "Content-Type: application/json" \
-      --data-raw "$prepare_body")
-
-    if [ "$prepare_http" = "503" ] || [ "$prepare_http" = "429" ] || [ "$prepare_http" = "409" ]; then
-      log "  (prepare returned $prepare_http, attempt $attempt/3, retrying in 3s...)" >&2
-      sleep 3
-      continue
-    fi
-
-    if [ "$prepare_http" != "200" ] && [ "$prepare_http" != "201" ]; then
-      log_error "Prepare failed with HTTP $prepare_http"
-      log_error "Response: $(head -c 500 "$tmp_prepare" 2>/dev/null)"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    local prepared_hash
-    prepared_hash=$(jq -r '.preparedTransactionHash // empty' "$tmp_prepare")
-    local hashing_version
-    hashing_version=$(jq -r '.hashingSchemeVersion // empty' "$tmp_prepare")
-
-    if [ -z "$prepared_hash" ]; then
-      log_error "Prepare response missing preparedTransactionHash"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    local sig
-    sig=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
-      const { signTransactionHash } = require('@canton-network/core-signing-lib');
-      const signature = signTransactionHash('$prepared_hash', '$private_key');
-      process.stdout.write(signature);
-    " 2>/dev/null) || sig=""
-
-    if [ -z "$sig" ]; then
-      log_error "Failed to sign prepared transaction"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    jq -n \
-      --arg userId "$user_id" \
-      --arg submissionId "utxo-merge-amulet-${cmd_id}" \
-      --arg preparedTx "$(jq -r '.preparedTransaction' "$tmp_prepare")" \
-      --arg hashVersion "$hashing_version" \
-      --arg party "$act_as_party" \
-      --arg sig "$sig" \
-      --arg signedBy "$fingerprint" \
-      '{
-        userId: $userId,
-        submissionId: $submissionId,
-        preparedTransaction: $preparedTx,
-        hashingSchemeVersion: $hashVersion,
-        partySignatures: {
-          signatures: [{
-            party: $party,
-            signatures: [{
-              signature: $sig,
-              signedBy: $signedBy,
-              format: "SIGNATURE_FORMAT_RAW",
-              signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"
-            }]
-          }]
-        },
-        deduplicationPeriod: {Empty: {}}
-      }' > "$tmp_execute_body"
-
-    local execute_http
-    execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
-      "$json_api/v2/interactive-submission/executeAndWaitForTransaction" \
-      -H "Authorization: Bearer $auth_token" \
-      -H "Content-Type: application/json" \
-      -d @"$tmp_execute_body")
-
-    if [ "$execute_http" = "503" ] || [ "$execute_http" = "429" ] || [ "$execute_http" = "409" ]; then
-      log "  (execute returned $execute_http, attempt $attempt/3, retrying in 3s...)" >&2
-      sleep 3
-      continue
-    fi
-
-    if [ "$execute_http" != "200" ] && [ "$execute_http" != "201" ]; then
-      log_error "Execute failed with HTTP $execute_http"
-      log_error "Response: $(head -c 500 "$tmp_execute_resp" 2>/dev/null)"
-      rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-      return 1
-    fi
-
-    cat "$tmp_execute_resp"
-    rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-    return 0
-  done
-
-  log_error "All 3 attempts failed for $cmd_id_prefix"
-  rm -f "$tmp_prepare" "$tmp_execute_body" "$tmp_execute_resp"
-  return 1
+  curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+    --data-raw "$submit_body" || return 1
 }
 
 # Query active contracts from a given JSON API endpoint
@@ -339,20 +255,13 @@ log "=========================================="
 log "UTXO Merging — Merge Amulet (CC) Holdings"
 log "=========================================="
 log "  Wallets: $NUM_WALLETS"
+log "  Operator: ${OPERATOR_PARTY:0:50}..."
+log "  FeaturedAppRight: ${FAR_CID:0:40}..."
 log ""
 
 # Generate tokens for both app-user and SV participants
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 SV_CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_SV_USER" "$SHARED_SECRET_AUDIENCE")
-
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
-  | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
-
-if [ -z "$SYNCHRONIZER_ID" ]; then
-  log_error "Could not get connected synchronizer"
-  exit 1
-fi
-log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
 
 # Resolve DSO party ID
 DSO_PARTY=$(curl_check "$APP_USER_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
@@ -435,19 +344,28 @@ if [ -z "$OR_CID" ] || [ -z "$OR_BLOB" ]; then
 fi
 log "  OpenMiningRound: ${OR_CID:0:40}..."
 
-# Build disclosed contracts (ExternalPartyAmuletRules + AmuletRules + OpenMiningRound)
+# Get synchronizer ID for disclosed contracts
+SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+  | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
+
+# Build disclosed contracts (ExternalPartyAmuletRules + AmuletRules + OpenMiningRound + FeaturedAppRight)
 DISCLOSED_CONTRACTS=$(jq -n \
   --arg eparCid "$EPAR_CID" --arg eparTemplate "$EPAR_TEMPLATE_HASH" --arg eparBlob "$EPAR_BLOB" \
   --arg arCid "$AR_CID" --arg arTemplate "$AR_TEMPLATE_HASH" --arg arBlob "$AR_BLOB" \
   --arg orCid "$OR_CID" --arg orTemplate "$OR_TEMPLATE_HASH" --arg orBlob "$OR_BLOB" \
   --arg syncId "$SYNCHRONIZER_ID" \
+  --arg farCid "$(jq -r '.featuredAppRight.disclosure.contractId' "$FAR_FILE")" \
+  --arg farTemplate "$(jq -r '.featuredAppRight.disclosure.templateId' "$FAR_FILE")" \
+  --arg farBlob "$(jq -r '.featuredAppRight.disclosure.createdEventBlob' "$FAR_FILE")" \
+  --arg farSync "$(jq -r '.featuredAppRight.disclosure.synchronizerId' "$FAR_FILE")" \
   '[
     { contractId: $eparCid, templateId: $eparTemplate, createdEventBlob: $eparBlob, synchronizerId: $syncId },
     { contractId: $arCid, templateId: $arTemplate, createdEventBlob: $arBlob, synchronizerId: $syncId },
-    { contractId: $orCid, templateId: $orTemplate, createdEventBlob: $orBlob, synchronizerId: $syncId }
+    { contractId: $orCid, templateId: $orTemplate, createdEventBlob: $orBlob, synchronizerId: $syncId },
+    { contractId: $farCid, templateId: $farTemplate, createdEventBlob: $farBlob, synchronizerId: $farSync }
   ]')
 
-log "  Disclosed contracts ready (3 contracts)"
+log "  Disclosed contracts ready (4 contracts)"
 
 ##############################################################################
 # Step 2: Merge Amulet holdings for each wallet
@@ -477,8 +395,6 @@ MERGED_RESULTS=()
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
   WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
 
   log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT..."
 
@@ -523,11 +439,11 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
   log "    Total amount: $TOTAL_AMOUNT CC (from $HOLDING_COUNT holdings)"
 
-  # 2c. Exercise TransferFactory_Transfer on ExternalPartyAmuletRules (self-transfer)
-  # NOTE: For interface choices, put the interface ID in templateId (Canton JSON API v2 requirement)
+  # 2c. Exercise MergeDelegation_Merge (operator submits via regular submission)
   # ExtraArgs context: amulet-rules + open-round (required by unfeaturedPaymentContextFromChoiceContext)
-  TRANSFER_CMD=$(jq -n \
-    --arg templateId "$TRANSFER_FACTORY_INTERFACE" \
+  MERGE_CMD=$(jq -n \
+    --arg delegTemplateId "$DELEGATION_TEMPLATE" \
+    --arg delegCid "$DELEG_CID" \
     --arg factoryCid "$EPAR_CID" \
     --arg admin "$DSO_PARTY" \
     --arg party "$WALLET_PARTY" \
@@ -537,131 +453,79 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     --argjson holdingCids "$HOLDING_CIDS" \
     --arg arCid "$AR_CID" \
     --arg orCid "$OR_CID" \
+    --arg farCid "$FAR_CID" \
+    --arg operator "$OPERATOR_PARTY" \
     '[{
       ExerciseCommand: {
-        templateId: $templateId,
-        contractId: $factoryCid,
-        choice: "TransferFactory_Transfer",
+        templateId: $delegTemplateId,
+        contractId: $delegCid,
+        choice: "MergeDelegation_Merge",
         choiceArgument: {
-          expectedAdmin: $admin,
-          transfer: {
-            sender: $party,
-            receiver: $party,
-            amount: $amount,
-            instrumentId: { admin: $admin, id: "Amulet" },
-            requestedAt: $requestedAt,
-            executeBefore: $executeBefore,
-            inputHoldingCids: $holdingCids,
-            meta: { values: {} }
-          },
-          extraArgs: {
-            context: {
-              values: {
-                "amulet-rules": { tag: "AV_ContractId", value: $arCid },
-                "open-round": { tag: "AV_ContractId", value: $orCid }
+          optMergeTransfer: {
+            factoryCid: $factoryCid,
+            choiceArg: {
+              expectedAdmin: $admin,
+              transfer: {
+                sender: $party,
+                receiver: $party,
+                amount: $amount,
+                instrumentId: { admin: $admin, id: "Amulet" },
+                requestedAt: $requestedAt,
+                executeBefore: $executeBefore,
+                inputHoldingCids: $holdingCids,
+                meta: { values: {} }
+              },
+              extraArgs: {
+                context: {
+                  values: {
+                    "amulet-rules": { tag: "AV_ContractId", value: $arCid },
+                    "open-round": { tag: "AV_ContractId", value: $orCid }
+                  }
+                },
+                meta: { values: {} }
               }
-            },
-            meta: { values: {} }
+            }
+          },
+          optExtraTransfer: null,
+          optFeaturedAppRight: {
+            appRightCid: $farCid,
+            beneficiaries: [
+              { beneficiary: $operator, weight: "1.0" }
+            ]
           }
         }
       }
     }]')
 
-  TRANSFER_TX=$(interactive_submit "$TRANSFER_CMD" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-    "merge-transfer-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
-    log_error "TransferFactory_Transfer failed for $WALLET_HINT"
+  MERGE_TX=$(regular_submit "$OPERATOR_PARTY" "$WALLET_PARTY" "$MERGE_CMD" \
+    "merge-amulet-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
+    log_error "MergeDelegation_Merge failed for $WALLET_HINT"
     exit 1
   }
 
-  # For self-transfers (sender==receiver), Amulet may directly produce the merged holding
-  # without creating a TransferInstruction. Check for both cases.
-  INSTRUCTION_CID=$(echo "$TRANSFER_TX" | jq -r '
+  # Extract merged Amulet CID from response
+  MERGED_CID=$(echo "$MERGE_TX" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty)
-     | select(.templateId | tostring | (contains("TransferInstruction") or contains("TransferOffer")))
-     | select(.templateId | tostring | contains("TransferFactory") | not)
+     | select(.templateId | tostring | test("Splice\\.Amulet:Amulet$"))
      | .contractId][0] // empty
   ' 2>/dev/null || echo "")
 
-  if [ -n "$INSTRUCTION_CID" ] && [ "$INSTRUCTION_CID" != "null" ]; then
-    # Two-step: TransferInstruction was created → need to accept it
-    log "    Transfer instruction created: ${INSTRUCTION_CID:0:30}..."
-
-    # 2d. Exercise TransferInstruction_Accept
-    # NOTE: For interface choices, put the interface ID in templateId (Canton JSON API v2 requirement)
-    ACCEPT_CMD=$(jq -n \
-      --arg templateId "$TRANSFER_INSTRUCTION_INTERFACE" \
-      --arg contractId "$INSTRUCTION_CID" \
-      --arg arCid "$AR_CID" \
-      --arg orCid "$OR_CID" \
-      '[{
-        ExerciseCommand: {
-          templateId: $templateId,
-          contractId: $contractId,
-          choice: "TransferInstruction_Accept",
-          choiceArgument: {
-            extraArgs: {
-              context: {
-                values: {
-                  "amulet-rules": { tag: "AV_ContractId", value: $arCid },
-                  "open-round": { tag: "AV_ContractId", value: $orCid }
-                }
-              },
-              meta: { values: {} }
-            }
-          }
-        }
-      }]')
-
-    ACCEPT_TX=$(interactive_submit "$ACCEPT_CMD" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-      "merge-accept-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
-      log_error "TransferInstruction_Accept failed for $WALLET_HINT"
-      exit 1
-    }
-
-    # Extract merged Amulet CID from accept response
-    MERGED_CID=$(echo "$ACCEPT_TX" | jq -r '
+  # Fallback: broader match
+  if [ -z "$MERGED_CID" ]; then
+    MERGED_CID=$(echo "$MERGE_TX" | jq -r '
       [.transaction.events[] | (.CreatedEvent // .created // empty)
-       | select(.templateId | tostring | test("Splice\\.Amulet:Amulet$"))
+       | select(.templateId | tostring | contains("Amulet"))
+       | select(.templateId | tostring | contains("AmuletRules") | not)
+       | select(.templateId | tostring | contains("AmuletAllocation") | not)
+       | select(.templateId | tostring | contains("AmuletTransfer") | not)
+       | select(.templateId | tostring | contains("LockedAmulet") | not)
        | .contractId][0] // empty
     ' 2>/dev/null || echo "")
-
-    # Fallback: broader match
-    if [ -z "$MERGED_CID" ]; then
-      MERGED_CID=$(echo "$ACCEPT_TX" | jq -r '
-        [.transaction.events[] | (.CreatedEvent // .created // empty)
-         | select(.templateId | tostring | contains("Amulet"))
-         | select(.templateId | tostring | contains("AmuletRules") | not)
-         | select(.templateId | tostring | contains("AmuletAllocation") | not)
-         | select(.templateId | tostring | contains("AmuletTransfer") | not)
-         | select(.templateId | tostring | contains("LockedAmulet") | not)
-         | .contractId][0] // empty
-      ' 2>/dev/null || echo "")
-    fi
-  else
-    # Self-transfer optimization: Amulet was directly created (no TransferInstruction step)
-    log "    Self-transfer: merged directly (no TransferInstruction step)"
-    MERGED_CID=$(echo "$TRANSFER_TX" | jq -r '
-      [.transaction.events[] | (.CreatedEvent // .created // empty)
-       | select(.templateId | tostring | test("Splice\\.Amulet:Amulet$"))
-       | .contractId][0] // empty
-    ' 2>/dev/null || echo "")
-
-    if [ -z "$MERGED_CID" ]; then
-      MERGED_CID=$(echo "$TRANSFER_TX" | jq -r '
-        [.transaction.events[] | (.CreatedEvent // .created // empty)
-         | select(.templateId | tostring | contains("Amulet"))
-         | select(.templateId | tostring | contains("AmuletRules") | not)
-         | select(.templateId | tostring | contains("AmuletAllocation") | not)
-         | select(.templateId | tostring | contains("AmuletTransfer") | not)
-         | select(.templateId | tostring | contains("LockedAmulet") | not)
-         | .contractId][0] // empty
-      ' 2>/dev/null || echo "")
-    fi
   fi
 
   if [ -z "$MERGED_CID" ]; then
     log_error "Could not extract merged Amulet CID for $WALLET_HINT"
-    log_error "Events: $(echo "$ACCEPT_TX" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | {templateId, contractId}]' 2>/dev/null | head -c 500)"
+    log_error "Events: $(echo "$MERGE_TX" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | {templateId, contractId}]' 2>/dev/null | head -c 500)"
     exit 1
   fi
 
