@@ -516,13 +516,17 @@ log "  All ${#HOLDINGS[@]} mint requests accepted."
 log ""
 log "Step 3: Writing holdings report..."
 
+PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+
 REPORT_JSON=$(jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg partyHint "$PARTY_HINT_VALUE" \
   --arg cbtcNetworkParty "$CBTC_NETWORK_PARTY" \
   --arg tokenId "$CBTC_TOKEN_ID" \
   --argjson totalHoldings "${#HOLDINGS[@]}" \
   '{
     generatedAt: $generatedAt,
+    partyHint: $partyHint,
     cbtcNetworkParty: $cbtcNetworkParty,
     tokenId: $tokenId,
     totalHoldings: $totalHoldings,
@@ -530,7 +534,6 @@ REPORT_JSON=$(jq -n \
   }')
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
   WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
 
@@ -549,12 +552,11 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   done
 
   REPORT_JSON=$(echo "$REPORT_JSON" | jq \
-    --arg hint "$WALLET_HINT" \
     --arg partyId "$WALLET_PARTY" \
     --arg userId "$WALLET_USER" \
     --argjson holdings "$WALLET_HOLDINGS" \
     --argjson totalAmount "$WALLET_TOTAL" \
-    '.wallets += [{ partyHint: $hint, partyId: $partyId, userId: $userId, holdings: $holdings, totalAmount: $totalAmount }]')
+    '.wallets += [{ partyId: $partyId, userId: $userId, holdings: $holdings, totalAmount: $totalAmount }]')
 done
 
 echo "$REPORT_JSON" | jq '.' > "$HOLDINGS_FILE"

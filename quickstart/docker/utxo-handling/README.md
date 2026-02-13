@@ -90,7 +90,7 @@ Scripts for generating user wallets with CBTC token holdings and setting up merg
 
 ## Script 1: `01-generate-user-wallet.sh`
 
-Generates 25 user wallet external parties and onboards them on the app-user participant.
+Generates user wallet external parties with random multicultural names (European, Chinese, Vietnamese) and onboards them on the app-user participant. Each wallet gets a shared party hint (default `kairo`, customizable via `PARTY_HINT`), a unique display name, and a generated Gmail email address.
 
 ### Usage
 
@@ -99,32 +99,33 @@ Generates 25 user wallet external parties and onboards them on the app-user part
 
 # With custom number of wallets
 NUM_WALLETS=5 ./01-generate-user-wallet.sh
+
+# With custom party hint
+PARTY_HINT=myapp ./01-generate-user-wallet.sh
 ```
 
 ### Configuration
 
-Configurable constants at the top of the script:
+Configurable via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NUM_WALLETS` | `25` | Number of user wallets to generate |
-| `MINTS_PER_WALLET` | `20` | Number of CBTC mint requests per wallet |
-| `MIN_AMOUNT` | `100` | Minimum CBTC amount per holding |
-| `MAX_AMOUNT` | `1000` | Maximum CBTC amount per holding |
+| `PARTY_HINT` | `kairo` | Party hint used for all external parties on the ledger |
 
 ### What It Does
 
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | Pre-flight | Sources `../setup-exchange/.env`, loads CBTC config and keypair, generates Canton JWT, gets synchronizer ID |
-| — | Cleanup | Removes downstream JSON files from previous runs (`user-wallet-holdings-*.json`, `user-wallet-merge-delegation.json`, `user-wallet-merged-holdings-*.json`) |
-| 1 | Generate keypairs | Creates 25 Ed25519 keypairs in a single Node.js invocation using `@canton-network/core-signing-lib`. Saves to `user-wallet-keypairs.json` |
+| -- | Cleanup | Removes downstream JSON files from previous runs (`user-wallet-holdings-*.json`, `user-wallet-merge-delegation.json`, `user-wallet-merged-holdings-*.json`) |
+| 1 | Generate keypairs | Creates Ed25519 keypairs with random multicultural names (European, Chinese, Vietnamese) in a single Node.js invocation using `@canton-network/core-signing-lib`. All wallets share the same `partyHint` (from `PARTY_HINT` env var); each gets a unique `displayName` and `email`. Saves to `user-wallet-keypairs.json` |
 | 2 | Onboard external parties | For each wallet: `generate-topology` -> sign multiHash -> `allocate`. Updates keypairs file with resolved party IDs |
-| 3 | Create Canton users | Creates 25 Canton users with `CanActAs`/`CanReadAs` rights. Also grants admin user rights over each wallet party |
+| 3 | Create Canton users | Creates Canton users with `CanActAs`/`CanReadAs` rights. Also grants admin user rights over each wallet party |
 
 ### Idempotency
 
-- Keypair generation is skipped if `user-wallet-keypairs.json` already exists with the correct number of entries.
+- Keypairs are regenerated with fresh random names on every run (existing file is deleted automatically).
 - External party allocation checks if each party exists before allocating.
 - Canton user creation checks via `GET /v2/users/{userId}` before creating.
 
@@ -132,22 +133,26 @@ Configurable constants at the top of the script:
 
 | File | Description |
 |------|-------------|
-| `user-wallet-keypairs.json` | Array of 25 wallet entries with `partyHint`, `userId`, `partyId`, `publicKey`, `privateKey`, `fingerprint` |
+| `user-wallet-keypairs.json` | Object with top-level `partyHint` and `wallets` array containing wallet entries |
 
 #### `user-wallet-keypairs.json` format
 
 ```json
-[
-  {
-    "index": 0,
-    "partyHint": "user-wallet-01",
-    "userId": "user-wallet-01-user",
-    "partyId": "user-wallet-01::1220...",
-    "publicKey": "base64...",
-    "privateKey": "base64...",
-    "fingerprint": "1220..."
-  }
-]
+{
+  "partyHint": "kairo",
+  "wallets": [
+    {
+      "index": 0,
+      "displayName": "Emma Mueller",
+      "email": "emma.mueller.x3kQ2@gmail.com",
+      "userId": "emma-mueller",
+      "partyId": "kairo::1220...",
+      "publicKey": "base64...",
+      "privateKey": "base64...",
+      "fingerprint": "1220..."
+    }
+  ]
+}
 ```
 
 ---
@@ -218,14 +223,14 @@ Both parties are external, so both steps use **interactive submission** (prepare
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "cbtcNetworkParty": "CBTC-NETWORK::1220...",
   "tokenId": "CBTC",
   "totalHoldings": 500,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 423 },
         { "contractId": "00...", "amount": 781 }
@@ -300,14 +305,14 @@ Configurable via `utxo-handling/.env` or environment variables:
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "dsoParty": "DSO::1220...",
   "tokenId": "Amulet",
   "totalHoldings": 500,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 547 },
         { "contractId": "00...", "amount": 312 }
@@ -359,6 +364,7 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
 **Operator**: The `EXECUTOR_PARTY_ID` from the exchange backend's `.env` file. This is the app-user party that the backend acts as. It will later use the `MergeDelegation` contracts to merge holdings via `MergeDelegation_Merge`.
 
 **MergeDelegation template** (`#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation`):
+
 - Fields: `operator` (Party), `owner` (Party), `meta` (Metadata)
 - Signatories: both `owner` and `operator`
 - Key choices:
@@ -373,14 +379,14 @@ The creation follows a two-step proposal/accept pattern from `splice-util-token-
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "operatorParty": "app_user_quickstart-...",
   "mergeDelegationTemplateId": "#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation",
   "totalDelegations": 25,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "mergeDelegationContractId": "00..."
     }
   ]
@@ -419,6 +425,7 @@ The workflow involves three Daml templates from `splice-util-token-standard-wall
 - Signatories: both `operator` and `owner`
 
 **BatchMergeUtility**:
+
 - `operator` (Party) — the batch processor
 - `changeHoldings` (Map InstrumentId ContractId) — tracks change holdings between merge calls
 - Signatory: `operator`
@@ -564,14 +571,14 @@ The merge uses `MergeDelegation_Merge` which internally exercises `TransferFacto
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "cbtcNetworkParty": "CBTC-NETWORK::1220...",
   "tokenId": "CBTC",
   "totalHoldings": 25,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 8452 }
       ],
@@ -648,14 +655,14 @@ After merging, the script compares each wallet's `totalAmount` in `user-wallet-m
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "dsoParty": "DSO::1220...",
   "tokenId": "Amulet",
   "totalHoldings": 25,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 11234 }
       ],
@@ -679,6 +686,7 @@ This separation is useful when you want to inspect or modify the holdings data b
 ### Prerequisites
 
 Scripts 07-10 require:
+
 - `01-generate-user-wallet.sh` completed (keypairs exist)
 - `04-create-merge-delegation.sh` completed (MergeDelegation contracts exist) -- for scripts 09/10
 - Holdings exist on the ledger (from scripts 02/03 or previous operations)
@@ -732,15 +740,15 @@ No configurable parameters — the script processes all wallets found in the key
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "cbtcNetworkParty": "CBTC-NETWORK::1220...",
   "tokenId": "CBTC",
   "templateId": "#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding",
   "totalHoldings": 500,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 423 },
         { "contractId": "00...", "amount": 781 }
@@ -798,15 +806,15 @@ No configurable parameters — the script processes all wallets found in the key
 ```json
 {
   "generatedAt": "2026-02-11T...",
+  "partyHint": "kairo",
   "dsoParty": "DSO::1220...",
   "tokenId": "Amulet",
   "templateId": "#splice-amulet:Splice.Amulet:Amulet",
   "totalHoldings": 500,
   "wallets": [
     {
-      "partyHint": "user-wallet-01",
-      "partyId": "user-wallet-01::1220...",
-      "userId": "user-wallet-01-user",
+      "partyId": "kairo::1220...",
+      "userId": "emma-mueller",
       "holdings": [
         { "contractId": "00...", "amount": 547 },
         { "contractId": "00...", "amount": 312 }
@@ -963,6 +971,7 @@ Participant-hosted parties (like the executor) use standard command submission:
 ### Ed25519 Keypair Format
 
 All scripts use NaCl/TweetNaCl format Ed25519 keypairs generated by `@canton-network/core-signing-lib`:
+
 - **Public key**: 32 bytes, base64-encoded
 - **Private key**: 64 bytes (seed + public key), base64-encoded
 - **Canton fingerprint**: `1220` + SHA256(uint32BE(12) + publicKeyBytes) as hex

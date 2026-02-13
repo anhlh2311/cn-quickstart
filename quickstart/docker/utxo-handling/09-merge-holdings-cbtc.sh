@@ -85,7 +85,7 @@ for f in "$KEYPAIRS_FILE" "$DELEGATIONS_FILE" "$HOLDINGS_INPUT_FILE"; do
   fi
 done
 
-NUM_WALLETS=$(jq 'length' "$KEYPAIRS_FILE")
+NUM_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 
 # Load factory data from cbtc-factories.json
 FACTORIES_FILE="$SETUP_DIR/cbtc-factories.json"
@@ -337,10 +337,10 @@ fi
 MERGED_RESULTS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
 
-  log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT..."
+  log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME..."
 
   # 1a. Verify MergeDelegation exists
   DELEG_RESPONSE=$(query_active_contracts "$WALLET_PARTY" "$DELEGATION_TEMPLATE" "false" "false")
@@ -349,14 +349,14 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   ' 2>/dev/null || echo "")
 
   if [ -z "$DELEG_CID" ] || [ "$DELEG_CID" = "null" ]; then
-    log_error "No MergeDelegation found for $WALLET_HINT"
+    log_error "No MergeDelegation found for $WALLET_NAME"
     exit 1
   fi
   log "    MergeDelegation verified: ${DELEG_CID:0:30}..."
 
   # 1b. Read holdings from JSON file
-  HOLDINGS_DATA=$(jq -c --arg hint "$WALLET_HINT" '
-    .wallets[] | select(.partyHint == $hint) | .holdings
+  HOLDINGS_DATA=$(jq -c --arg user "$WALLET_NAME" '
+    .wallets[] | select(.userId == $user) | .holdings
   ' "$HOLDINGS_INPUT_FILE" 2>/dev/null || echo "[]")
 
   HOLDING_COUNT=$(echo "$HOLDINGS_DATA" | jq 'length')
@@ -438,8 +438,8 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     }]')
 
   MERGE_TX=$(regular_submit "$OPERATOR_PARTY" "$WALLET_PARTY" "$MERGE_CMD" \
-    "merge-cbtc-$WALLET_HINT" "$DISCLOSED_CONTRACTS") || {
-    log_error "MergeDelegation_Merge failed for $WALLET_HINT"
+    "merge-cbtc-$WALLET_NAME" "$DISCLOSED_CONTRACTS") || {
+    log_error "MergeDelegation_Merge failed for $WALLET_NAME"
     exit 1
   }
 
@@ -451,7 +451,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   ' 2>/dev/null || echo "")
 
   if [ -z "$MERGED_CID" ]; then
-    log_error "Could not extract merged Holding CID for $WALLET_HINT"
+    log_error "Could not extract merged Holding CID for $WALLET_NAME"
     log_error "Events: $(echo "$MERGE_TX" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | {templateId, contractId}]' 2>/dev/null | head -c 500)"
     exit 1
   fi
@@ -470,13 +470,17 @@ log "  All wallets processed. Merged: ${#MERGED_RESULTS[@]}"
 log ""
 log "Step 2: Writing merged holdings report..."
 
+PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+
 REPORT_JSON=$(jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg partyHint "$PARTY_HINT_VALUE" \
   --arg cbtcNetworkParty "$CBTC_NETWORK_PARTY" \
   --arg tokenId "$CBTC_TOKEN_ID" \
   --argjson totalHoldings "${#MERGED_RESULTS[@]}" \
   '{
     generatedAt: $generatedAt,
+    partyHint: $partyHint,
     cbtcNetworkParty: $cbtcNetworkParty,
     tokenId: $tokenId,
     totalHoldings: $totalHoldings,
@@ -486,18 +490,15 @@ REPORT_JSON=$(jq -n \
 for entry in "${MERGED_RESULTS[@]}"; do
   IFS='|' read -r WALLET_IDX HOLDING_CID AMOUNT <<< "$entry"
 
-  WALLET_HINT=$(jq -r ".[$WALLET_IDX].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$WALLET_IDX].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$WALLET_IDX].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$WALLET_IDX].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$WALLET_IDX].userId" "$KEYPAIRS_FILE")
 
   REPORT_JSON=$(echo "$REPORT_JSON" | jq \
-    --arg hint "$WALLET_HINT" \
     --arg partyId "$WALLET_PARTY" \
     --arg userId "$WALLET_USER" \
     --arg holdingCid "$HOLDING_CID" \
     --arg amount "$AMOUNT" \
     '.wallets += [{
-      partyHint: $hint,
       partyId: $partyId,
       userId: $userId,
       holdings: [{ contractId: $holdingCid, amount: ($amount | tonumber) }],
@@ -519,12 +520,12 @@ VERIFICATION_PASSED=true
 MISMATCHES=0
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".wallets[$i].partyHint" "$HOLDINGS_INPUT_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$HOLDINGS_INPUT_FILE")
 
   ORIGINAL_TOTAL=$(jq -r ".wallets[$i].totalAmount" "$HOLDINGS_INPUT_FILE")
 
-  MERGED_TOTAL=$(jq -r --arg hint "$WALLET_HINT" '
-    .wallets[] | select(.partyHint == $hint) | .totalAmount
+  MERGED_TOTAL=$(jq -r --arg user "$WALLET_USER" '
+    .wallets[] | select(.userId == $user) | .totalAmount
   ' "$MERGED_HOLDINGS_FILE" 2>/dev/null || echo "0")
 
   # Compare as integers (truncate decimals) to avoid formatting differences like 1151 vs 1151.0000000000
@@ -532,7 +533,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   MERGED_NORMALIZED=$(echo "$MERGED_TOTAL" | jq 'tonumber | floor')
 
   if [ "$ORIG_NORMALIZED" != "$MERGED_NORMALIZED" ]; then
-    log_error "MISMATCH: $WALLET_HINT — original: $ORIGINAL_TOTAL, merged: $MERGED_TOTAL"
+    log_error "MISMATCH: $WALLET_USER — original: $ORIGINAL_TOTAL, merged: $MERGED_TOTAL"
     VERIFICATION_PASSED=false
     MISMATCHES=$((MISMATCHES + 1))
   fi
