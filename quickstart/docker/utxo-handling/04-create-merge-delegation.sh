@@ -56,7 +56,7 @@ if [ -z "$OPERATOR_PARTY" ]; then
   exit 1
 fi
 
-NUM_WALLETS=$(jq 'length' "$KEYPAIRS_FILE")
+NUM_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 
 # Template IDs
 PROPOSAL_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegationProposal"
@@ -317,13 +317,14 @@ log "Step 1: Creating MergeDelegation contracts..."
 DELEGATIONS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$i].userId" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
+  WALLET_FP=$(jq -r ".wallets[$i].fingerprint" "$KEYPAIRS_FILE")
 
-  log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT..."
+  log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME..."
 
   # Step 1a: Owner creates MergeDelegationProposal via interactive submission
   PROPOSAL_CMD=$(jq -n \
@@ -343,8 +344,8 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       }
     }]')
 
-  PROPOSAL_RESULT=$(interactive_submit "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" "$PROPOSAL_CMD" "proposal-$WALLET_HINT") || {
-    log_error "Failed to create MergeDelegationProposal for $WALLET_HINT"
+  PROPOSAL_RESULT=$(interactive_submit "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" "$PROPOSAL_CMD" "proposal-$WALLET_NAME") || {
+    log_error "Failed to create MergeDelegationProposal for $WALLET_NAME"
     exit 1
   }
 
@@ -354,7 +355,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   ' 2>/dev/null || echo "")
 
   if [ -z "$PROPOSAL_CID" ]; then
-    log_error "Could not extract MergeDelegationProposal contract ID for $WALLET_HINT"
+    log_error "Could not extract MergeDelegationProposal contract ID for $WALLET_NAME"
     log_error "Response: $(echo "$PROPOSAL_RESULT" | head -c 500)"
     exit 1
   fi
@@ -373,8 +374,8 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       }
     }]')
 
-  ACCEPT_RESULT=$(regular_submit "$OPERATOR_PARTY" "$ACCEPT_CMD" "accept-$WALLET_HINT") || {
-    log_error "Failed to accept MergeDelegationProposal for $WALLET_HINT"
+  ACCEPT_RESULT=$(regular_submit "$OPERATOR_PARTY" "$ACCEPT_CMD" "accept-$WALLET_NAME") || {
+    log_error "Failed to accept MergeDelegationProposal for $WALLET_NAME"
     exit 1
   }
 
@@ -384,7 +385,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   ' 2>/dev/null || echo "")
 
   if [ -z "$DELEGATION_CID" ]; then
-    log_error "Could not extract MergeDelegation contract ID for $WALLET_HINT"
+    log_error "Could not extract MergeDelegation contract ID for $WALLET_NAME"
     log_error "Response: $(echo "$ACCEPT_RESULT" | head -c 500)"
     exit 1
   fi
@@ -419,9 +420,9 @@ REPORT_JSON=$(jq -n \
 for entry in "${DELEGATIONS[@]}"; do
   IFS='|' read -r WALLET_IDX DELEGATION_CID <<< "$entry"
 
-  WALLET_HINT=$(jq -r ".[$WALLET_IDX].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$WALLET_IDX].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$WALLET_IDX].userId" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$WALLET_IDX].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$WALLET_IDX].userId" "$KEYPAIRS_FILE")
 
   REPORT_JSON=$(echo "$REPORT_JSON" | jq \
     --arg hint "$WALLET_HINT" \
