@@ -404,13 +404,17 @@ log "  All $NUM_WALLETS MergeDelegation contracts created."
 log ""
 log "Step 2: Writing merge delegation report..."
 
+PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+
 REPORT_JSON=$(jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg partyHint "$PARTY_HINT_VALUE" \
   --arg operatorParty "$OPERATOR_PARTY" \
   --arg templateId "$DELEGATION_TEMPLATE_ID" \
   --argjson totalDelegations "${#DELEGATIONS[@]}" \
   '{
     generatedAt: $generatedAt,
+    partyHint: $partyHint,
     operatorParty: $operatorParty,
     mergeDelegationTemplateId: $templateId,
     totalDelegations: $totalDelegations,
@@ -420,17 +424,14 @@ REPORT_JSON=$(jq -n \
 for entry in "${DELEGATIONS[@]}"; do
   IFS='|' read -r WALLET_IDX DELEGATION_CID <<< "$entry"
 
-  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$WALLET_IDX].partyId" "$KEYPAIRS_FILE")
   WALLET_USER=$(jq -r ".wallets[$WALLET_IDX].userId" "$KEYPAIRS_FILE")
 
   REPORT_JSON=$(echo "$REPORT_JSON" | jq \
-    --arg hint "$WALLET_HINT" \
     --arg partyId "$WALLET_PARTY" \
     --arg userId "$WALLET_USER" \
     --arg delegationCid "$DELEGATION_CID" \
     '.wallets += [{
-      partyHint: $hint,
       partyId: $partyId,
       userId: $userId,
       mergeDelegationContractId: $delegationCid

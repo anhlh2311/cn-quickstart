@@ -53,7 +53,7 @@ if [ ! -f "$KEYPAIRS_FILE" ]; then
   exit 1
 fi
 
-NUM_WALLETS=$(jq 'length' "$KEYPAIRS_FILE")
+NUM_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 
 # Template ID for utility Holding
 HOLDING_TEMPLATE="#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding"
@@ -178,13 +178,16 @@ log ""
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 
 # Build the result JSON
+PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
 REPORT_JSON=$(jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg partyHint "$PARTY_HINT_VALUE" \
   --arg cbtcNetworkParty "$CBTC_NETWORK_PARTY" \
   --arg tokenId "$CBTC_TOKEN_ID" \
   --arg templateId "$HOLDING_TEMPLATE" \
   '{
     generatedAt: $generatedAt,
+    partyHint: $partyHint,
     cbtcNetworkParty: $cbtcNetworkParty,
     tokenId: $tokenId,
     templateId: $templateId,
@@ -195,11 +198,11 @@ REPORT_JSON=$(jq -n \
 TOTAL_HOLDINGS=0
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
 
-  log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT..."
+  log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME..."
 
   HOLDINGS_RESPONSE=$(query_active_contracts "$WALLET_PARTY" "$HOLDING_TEMPLATE")
 
@@ -217,13 +220,11 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   log "    Holdings: $HOLDING_COUNT (total amount: $WALLET_TOTAL)"
 
   REPORT_JSON=$(echo "$REPORT_JSON" | jq \
-    --arg hint "$WALLET_HINT" \
     --arg partyId "$WALLET_PARTY" \
     --arg userId "$WALLET_USER" \
     --argjson holdings "$HOLDINGS_DATA" \
     --argjson totalAmount "$WALLET_TOTAL" \
     '.wallets += [{
-      partyHint: $hint,
       partyId: $partyId,
       userId: $userId,
       holdings: $holdings,
