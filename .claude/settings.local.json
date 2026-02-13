@@ -11,7 +11,16 @@
       "Bash(NUM_WALLETS=2 TAPS_PER_WALLET=2 bash:*)",
       "Bash(NUM_WALLETS=2 bash:*)",
       "WebFetch(domain:docs.digitalasset.com)",
-      "WebFetch(domain:docs.dev.sync.global)"
+      "WebFetch(domain:docs.dev.sync.global)",
+      "Bash(NUM_WALLETS=3 ./01-generate-user-wallet.sh:*)",
+      "Bash(MINTS_PER_WALLET=3 ./02-request-minting-cbtc.sh:*)",
+      "Bash(TAPS_PER_WALLET=3 ./03-request-faucet-amulet.sh:*)",
+      "Bash(./04-create-merge-delegation.sh:*)",
+      "Bash(./05-user-wallet-utxo-merging-cbtc.sh:*)",
+      "Bash(./06-user-wallet-utxo-merging-amulet.sh:*)",
+      "Bash(./08-query-holdings-amulet.sh:*)",
+      "Bash(./09-merge-holdings-cbtc.sh:*)",
+      "Bash(./10-merge-holdings-amulet.sh:*)"
     ]
   }
 }
