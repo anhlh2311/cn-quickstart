@@ -1,11 +1,16 @@
 #!/bin/bash
-# Registers the FeaturedAppRight contract in the canton-exchange-backend database.
+# Registers the FeaturedAppRight contract in the canton-exchange-backend database
+# and exports contract data to featured-app-right.json for use by MergeDelegation scripts.
+#
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
 #   - setup-exchange.sh must have been run (DARs uploaded, contracts created)
 #   - canton-exchange-backend must be running (yarn start:dev)
 #
-# Usage: ./register-featured-app-right.sh
+# Outputs:
+#   - featured-app-right.json — contract ID, disclosure data (blob, templateId, synchronizerId)
+#
+# Usage: ./02-register-featured-app-right.sh
 
 set -eo pipefail
 
@@ -81,6 +86,89 @@ generate_backend_jwt() {
   signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$BACKEND_JWT_SECRET" -binary | b64url)
 
   echo "${header}.${payload}.${signature}"
+}
+
+# Output file for FeaturedAppRight contract data
+FAR_OUTPUT_FILE="$SCRIPT_DIR/featured-app-right.json"
+
+# Query FeaturedAppRight from Canton ledger (with createdEventBlob for disclosed contracts)
+query_far_from_ledger() {
+  local canton_token="$1"
+  local party="$2"
+
+  local offset
+  offset=$(curl -sf "$APP_USER_JSON_API/v2/state/ledger-end" \
+    -H "Authorization: Bearer $canton_token" \
+    -H "Content-Type: application/json" | jq -r '.offset')
+
+  local query_body
+  query_body=$(jq -n \
+    --arg party "$party" \
+    --arg offset "$offset" \
+    '{
+      filter: {
+        filtersByParty: {
+          ($party): {
+            cumulative: [{
+              identifierFilter: {
+                TemplateFilter: {
+                  value: {
+                    templateId: "#splice-amulet:Splice.Amulet:FeaturedAppRight",
+                    includeCreatedEventBlob: true
+                  }
+                }
+              }
+            }]
+          }
+        }
+      },
+      verbose: false,
+      activeAtOffset: $offset
+    }')
+
+  curl -sf "$APP_USER_JSON_API/v2/state/active-contracts" \
+    -H "Authorization: Bearer $canton_token" \
+    -H "Content-Type: application/json" \
+    --data-raw "$query_body" 2>/dev/null || echo ""
+}
+
+# Write featured-app-right.json with contract ID and disclosure data
+write_far_json() {
+  local contract_id="$1"
+  local template_id_hash="$2"
+  local blob="$3"
+  local sync_id="$4"
+  local party="$5"
+
+  jq -n \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg contractId "$contract_id" \
+    --arg templateId "#splice-amulet:Splice.Amulet:FeaturedAppRight" \
+    --arg type "$FEATURE_APP_RIGHT_TYPE" \
+    --arg beneficiary "$party" \
+    --arg disclosureCid "$contract_id" \
+    --arg disclosureTemplate "$template_id_hash" \
+    --arg disclosureBlob "$blob" \
+    --arg disclosureSyncId "$sync_id" \
+    '{
+      generatedAt: $generatedAt,
+      featuredAppRight: {
+        contractId: $contractId,
+        templateId: $templateId,
+        type: $type,
+        beneficiaries: [
+          { beneficiary: $beneficiary, weight: "1.0" }
+        ],
+        disclosure: {
+          contractId: $disclosureCid,
+          templateId: $disclosureTemplate,
+          createdEventBlob: $disclosureBlob,
+          synchronizerId: $disclosureSyncId
+        }
+      }
+    }' > "$FAR_OUTPUT_FILE"
+
+  log "  Exported to: $FAR_OUTPUT_FILE"
 }
 
 ##############################################################################
@@ -160,6 +248,35 @@ if [ -n "$EXISTING" ] && echo "$EXISTING" | jq -e '.data.featuredAppRightCid // 
   EXISTING_CID=$(echo "$EXISTING" | jq -r '.data.featuredAppRightCid // .featuredAppRightCid')
   log "  FeaturedAppRight already registered in backend: type=$FEATURE_APP_RIGHT_TYPE"
   log "  CID: $EXISTING_CID"
+
+  # Still export the JSON file (needed by MergeDelegation scripts)
+  if [ ! -f "$FAR_OUTPUT_FILE" ]; then
+    log "  Exporting FeaturedAppRight to JSON..."
+    CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
+
+    SYNCHRONIZER_ID=$(curl -sf "$APP_USER_JSON_API/v2/state/connected-synchronizers" \
+      -H "Authorization: Bearer $CANTON_TOKEN" \
+      -H "Content-Type: application/json" | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
+
+    FAR_RESPONSE=$(query_far_from_ledger "$CANTON_TOKEN" "$APP_USER_PARTY")
+    if [ -n "$FAR_RESPONSE" ]; then
+      FAR_TEMPLATE_HASH=$(echo "$FAR_RESPONSE" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.templateId][0] // empty
+      ' 2>/dev/null || echo "")
+      FAR_BLOB=$(echo "$FAR_RESPONSE" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.createdEventBlob][0] // empty
+      ' 2>/dev/null || echo "")
+
+      if [ -n "$FAR_BLOB" ] && [ -n "$SYNCHRONIZER_ID" ]; then
+        write_far_json "$EXISTING_CID" "$FAR_TEMPLATE_HASH" "$FAR_BLOB" "$SYNCHRONIZER_ID" "$APP_USER_PARTY"
+      else
+        log "  WARNING: Could not export JSON (missing blob or synchronizerId)"
+      fi
+    fi
+  else
+    log "  JSON already exported: $FAR_OUTPUT_FILE"
+  fi
+
   log ""
   log "Done. No action needed."
   exit 0
@@ -176,43 +293,26 @@ log "Step 3: Querying FeaturedAppRight from Canton ledger..."
 
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 
-OFFSET=$(curl -sf "$APP_USER_JSON_API/v2/state/ledger-end" \
+# Get synchronizer ID for disclosed contract metadata
+SYNCHRONIZER_ID=$(curl -sf "$APP_USER_JSON_API/v2/state/connected-synchronizers" \
   -H "Authorization: Bearer $CANTON_TOKEN" \
-  -H "Content-Type: application/json" | jq -r '.offset')
+  -H "Content-Type: application/json" | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
-FAR_QUERY=$(cat <<QEOF
-{
-  "filter":{
-    "filtersByParty":{
-      "$APP_USER_PARTY":{
-        "cumulative":[{
-          "identifierFilter":{
-            "TemplateFilter":{
-              "value":{
-                "templateId":"#splice-amulet:Splice.Amulet:FeaturedAppRight",
-                "includeCreatedEventBlob":false
-              }
-            }
-          }
-        }]
-      }
-    }
-  },
-  "verbose":false,
-  "activeAtOffset":"$OFFSET"
-}
-QEOF
-)
-
-FAR_RESPONSE=$(curl -sf "$APP_USER_JSON_API/v2/state/active-contracts" \
-  -H "Authorization: Bearer $CANTON_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data-raw "$FAR_QUERY" 2>/dev/null) || FAR_RESPONSE=""
+# Query with includeCreatedEventBlob: true (needed for disclosure data)
+FAR_RESPONSE=$(query_far_from_ledger "$CANTON_TOKEN" "$APP_USER_PARTY")
 
 FEATURED_APP_RIGHT_CID=""
+FAR_TEMPLATE_HASH=""
+FAR_BLOB=""
 if [ -n "$FAR_RESPONSE" ]; then
   FEATURED_APP_RIGHT_CID=$(echo "$FAR_RESPONSE" | jq -r '
     [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+  ' 2>/dev/null || echo "")
+  FAR_TEMPLATE_HASH=$(echo "$FAR_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.templateId][0] // empty
+  ' 2>/dev/null || echo "")
+  FAR_BLOB=$(echo "$FAR_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.createdEventBlob][0] // empty
   ' 2>/dev/null || echo "")
 fi
 
@@ -273,6 +373,20 @@ case "$HTTP_CODE" in
 esac
 
 ##############################################################################
+# Step 6: Export FeaturedAppRight to JSON file
+##############################################################################
+
+log ""
+log "Step 5: Exporting FeaturedAppRight to JSON..."
+
+if [ -n "$FAR_BLOB" ] && [ -n "$SYNCHRONIZER_ID" ]; then
+  write_far_json "$FEATURED_APP_RIGHT_CID" "$FAR_TEMPLATE_HASH" "$FAR_BLOB" "$SYNCHRONIZER_ID" "$APP_USER_PARTY"
+else
+  log "  WARNING: Could not export JSON (missing blob or synchronizerId)"
+  log "  Re-run this script to generate the JSON file."
+fi
+
+##############################################################################
 # Done
 ##############################################################################
 
@@ -282,3 +396,4 @@ log "Registration complete!"
 log "=========================================="
 log ""
 log "Verify: curl -s $BACKEND_URL/feature-app-right | jq"
+log "JSON export: cat $FAR_OUTPUT_FILE | jq"
