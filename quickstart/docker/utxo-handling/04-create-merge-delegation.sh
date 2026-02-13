@@ -317,10 +317,8 @@ log "Step 1: Creating MergeDelegation contracts..."
 DELEGATIONS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
   WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
   WALLET_FP=$(jq -r ".wallets[$i].fingerprint" "$KEYPAIRS_FILE")
 
