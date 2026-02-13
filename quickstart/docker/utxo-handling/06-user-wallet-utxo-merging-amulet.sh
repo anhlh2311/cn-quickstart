@@ -393,7 +393,6 @@ fi
 MERGED_RESULTS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
   WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
 
