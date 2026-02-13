@@ -117,7 +117,7 @@ if [ ! -f "$KEYPAIRS_FILE" ]; then
   echo "[mint-cbtc] Run 01-generate-user-wallet.sh first." >&2
   exit 1
 fi
-TOTAL_KEYPAIRS=$(jq 'length' "$KEYPAIRS_FILE")
+TOTAL_KEYPAIRS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 # Use configured NUM_WALLETS but cap at available keypairs
 if [ -z "$NUM_WALLETS" ] || [ "$NUM_WALLETS" -gt "$TOTAL_KEYPAIRS" ]; then
   NUM_WALLETS="$TOTAL_KEYPAIRS"
@@ -369,12 +369,13 @@ log "Step 1: Creating mint requests ($MINTS_PER_WALLET per wallet, $((NUM_WALLET
 MINT_REQUESTS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
+  WALLET_FP=$(jq -r ".wallets[$i].fingerprint" "$KEYPAIRS_FILE")
 
-  log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT: creating $MINTS_PER_WALLET mint requests..."
+  log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME: creating $MINTS_PER_WALLET mint requests..."
 
   for j in $(seq 1 "$MINTS_PER_WALLET"); do
     AMOUNT=$(( (RANDOM % (MAX_AMOUNT - MIN_AMOUNT + 1)) + MIN_AMOUNT ))
@@ -389,7 +390,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       --arg tokenId "$CBTC_TOKEN_ID" \
       --arg holder "$WALLET_PARTY" \
       --arg amount "${AMOUNT}.0" \
-      --arg reference "user-mint-${WALLET_HINT}-${j}" \
+      --arg reference "user-mint-${WALLET_NAME}-${j}" \
       --arg requestedAt "$REQUESTED_AT" \
       --arg executeBefore "$EXECUTE_BEFORE" \
       --arg icCid "$INSTRUMENT_CONFIG_CID" \
@@ -423,8 +424,8 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       }]')
 
     TX_RESULT=$(interactive_submit "$CMD_JSON" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-      "mint-req-${WALLET_HINT}-${j}" "$DISCLOSED_CONTRACTS") || {
-      log_error "Failed to create mint request #$j for $WALLET_HINT"
+      "mint-req-${WALLET_NAME}-${j}" "$DISCLOSED_CONTRACTS") || {
+      log_error "Failed to create mint request #$j for $WALLET_NAME"
       exit 1
     }
 
@@ -433,7 +434,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     ' 2>/dev/null || echo "")
 
     if [ -z "$MINT_CID" ]; then
-      log_error "Could not extract MintRequest contract ID for $WALLET_HINT mint #$j"
+      log_error "Could not extract MintRequest contract ID for $WALLET_NAME mint #$j"
       log_error "Response: $(echo "$TX_RESULT" | head -c 500)"
       exit 1
     fi
@@ -441,7 +442,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     MINT_REQUESTS+=("${i}|${MINT_CID}|${AMOUNT}")
   done
 
-  log "    Created $MINTS_PER_WALLET mint requests for $WALLET_HINT"
+  log "    Created $MINTS_PER_WALLET mint requests for $WALLET_NAME"
 done
 
 log "  Total mint requests created: ${#MINT_REQUESTS[@]}"
@@ -529,9 +530,9 @@ REPORT_JSON=$(jq -n \
   }')
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
 
   WALLET_HOLDINGS="[]"
   WALLET_TOTAL=0

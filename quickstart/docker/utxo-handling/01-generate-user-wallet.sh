@@ -30,6 +30,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   source "$SCRIPT_DIR/.env"
 fi
 NUM_WALLETS="${NUM_WALLETS:-25}"
+PARTY_HINT="${PARTY_HINT:-kairo}"
 
 # Load shared configuration from setup-exchange .env
 if [ ! -f "$SETUP_DIR/.env" ]; then
@@ -284,21 +285,112 @@ log ""
 log "Step 1: Generating $NUM_WALLETS keypairs..."
 
 if [ -f "$KEYPAIRS_FILE" ]; then
-  EXISTING_COUNT=$(jq 'length' "$KEYPAIRS_FILE")
-  if [ "$EXISTING_COUNT" -ge "$NUM_WALLETS" ]; then
-    log "  Keypairs file already exists with $EXISTING_COUNT entries: $KEYPAIRS_FILE"
-  else
-    log "  Keypairs file exists but only has $EXISTING_COUNT entries, regenerating..."
-    rm -f "$KEYPAIRS_FILE"
-  fi
+  log "  Deleting existing keypairs file (fresh random names each run)"
+  rm -f "$KEYPAIRS_FILE"
 fi
 
 if [ ! -f "$KEYPAIRS_FILE" ]; then
   KEYPAIRS_RAW=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
     const { createKeyPair } = require('@canton-network/core-signing-lib');
     const crypto = require('crypto');
+
+    // Name pools — European, Chinese (Mandarin/Cantonese/Hokkien/Teochew), Vietnamese (50 each)
+    const names = {
+      european: {
+        first: [
+          'Emma','Liam','Sofia','Lucas','Isabella','Felix','Olivia','Hugo','Mia','Alexander',
+          'Charlotte','Leo','Elena','Oscar','Anna','Henrik','Julia','Max','Amelia','Noah',
+          'Elise','Sebastian','Clara','Adrian','Nora','Viktor','Ingrid','Marco','Isla','Emil',
+          'Lucia','Matteo','Freya','Anton','Sophie','Erik','Lara','Florian','Hanna','Gabriel',
+          'Valentina','Lukas','Stella','Theo','Aurora','Nikolai','Emilia','Rafael','Klara','Stefan'
+        ],
+        last: [
+          'Mueller','Schmidt','Dubois','Martin','Rossi','Bianchi','Larsson','Nielsen','Kowalski','Novak',
+          'Garcia','Petrov','Fischer','Weber','Silva','Bergman','Laurent','Olsen','Koenig','Baxter',
+          'Johansson','Moretti','Richter','Dupont','Fernandez','Hoffmann','Andersen','Eriksson','Szabo','Wolf',
+          'Brandt','Leroy','Costa','Mancini','Jansen','Scholz','Persson','Lindberg','Kraemer','Morel',
+          'Kovacs','Santoro','Brennan','Vogel','Lehmann','Gruber','Berger','Hartmann','Klein','Fuchs'
+        ]
+      },
+      chinese: {
+        // Mixed dialects: Mandarin (Putonghua), Cantonese, Hokkien, Teochew
+        first: [
+          // Mandarin
+          'Wei','Jing','Ming','Hua','Yan','Jun','Lei','Xin','Fang','Yong',
+          'Hao','Tao','Qian','Rui','Bo','Zhen','Kai','Yi','Cheng','Shuang',
+          // Cantonese
+          'Wai','Siu','Tsz','Lok','Yin','Pak','Cheuk','Wing','Ting','Kwok',
+          // Hokkien
+          'Beng','Hock','Kian','Seng','Chuan','Leng','Swee','Gek','Poh','Teck',
+          // Teochew
+          'Guan','Lian','Seow','Chye','Keng','Gim','Peng','Huay','Boon','Geok'
+        ],
+        last: [
+          // Mandarin romanization
+          'Wang','Li','Zhang','Liu','Chen','Yang','Huang','Zhou','Wu','Xu',
+          'Sun','Ma','Zhu','Gao','Lin','He','Guo','Luo','Song','Deng',
+          // Cantonese romanization
+          'Wong','Chan','Lau','Leung','Cheung','Ng','Tang','Lam','Chow','Yip',
+          'Fung','Kwong','Tse','Mak','Tam',
+          // Hokkien/Teochew romanization
+          'Tan','Lim','Ong','Koh','Goh','Teo','Sim','Chua','Chia','Tay',
+          'Ang','Yeo','Foo','Khoo','Seah'
+        ]
+      },
+      vietnamese: {
+        first: [
+          'Minh','Anh','Hoa','Duc','Linh','Tuan','Lan','Phong','Mai','Hung',
+          'Thanh','Binh','Thao','Cuong','Vy','Khoa','Ngoc','Trang','Quang','Khanh',
+          'Hien','Trung','Thuy','Dung','Tien','Nhan','Phuong','Tam','Vinh','Hau',
+          'Bao','Diem','Gia','Huy','Kim','Long','My','Nam','Oanh','Phuc',
+          'Quyen','Son','Thien','Uyen','Van','Xuan','Yen','Dat','Hanh','Lam'
+        ],
+        last: [
+          'Nguyen','Tran','Le','Pham','Hoang','Vu','Dang','Bui','Do','Ho',
+          'Ngo','Duong','Ly','Truong','Dinh','Luu','Trinh','Ta','Cao','Lam',
+          'Luong','Doan','Phan','Ha','Mai','Chau','Tong','La','Quach','Nham',
+          'Nghiem','Dao','Vuong','Tieu','Bach','Phung','Chu','Trieu','Khuu','Huynh',
+          'Ton','Thach','Dam','Thai','Lac','Kieu','Mach','Trang','Linh','Au'
+        ]
+      }
+    };
+    const cultures = Object.keys(names);
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    const randChars = () => {
+      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.';
+      const len = 4 + Math.floor(Math.random() * 5); // 4-8 chars
+      let s = '';
+      for (let j = 0; j < len; j++) s += chars[Math.floor(Math.random() * chars.length)];
+      // Ensure no leading/trailing dots and no consecutive dots
+      return s.replace(/^\\./,'a').replace(/\\.$/,'z').replace(/\\.{2,}/g,'.');
+    };
+
+    // ~30% cross-culture mix: European first + Chinese/Vietnamese last (e.g., Alex Nguyen, Felix Chen)
+    const asianLast = [...names.chinese.last, ...names.vietnamese.last];
+    const pickName = () => {
+      if (Math.random() < 0.3) {
+        return { first: pick(names.european.first), last: pick(asianLast) };
+      }
+      const pool = names[pick(cultures)];
+      return { first: pick(pool.first), last: pick(pool.last) };
+    };
+
+    const usedNames = new Set();
     const wallets = [];
-    for (let i = 1; i <= $NUM_WALLETS; i++) {
+    for (let i = 0; i < $NUM_WALLETS; i++) {
+      const hint = '$PARTY_HINT';
+      let displayName;
+      // Generate unique display name
+      do {
+        const { first, last } = pickName();
+        displayName = first + ' ' + last;
+      } while (usedNames.has(displayName));
+      usedNames.add(displayName);
+
+      const namePart = displayName.toLowerCase().replace(/ /g, '.');
+      const email = namePart + '.' + randChars() + '@gmail.com';
+      const userId = displayName.toLowerCase().replace(/ /g, '-');
+
       const kp = createKeyPair();
       const pubKeyBytes = Buffer.from(kp.publicKey, 'base64');
       const hashInput = Buffer.alloc(4 + pubKeyBytes.length);
@@ -306,18 +398,18 @@ if [ ! -f "$KEYPAIRS_FILE" ]; then
       pubKeyBytes.copy(hashInput, 4);
       const hash = crypto.createHash('sha256').update(hashInput).digest();
       const fingerprint = Buffer.concat([Buffer.from([0x12, 0x20]), hash]).toString('hex');
-      const idx = String(i).padStart(2, '0');
       wallets.push({
-        index: i - 1,
-        partyHint: 'user-wallet-' + idx,
-        userId: 'user-wallet-' + idx + '-user',
+        index: i,
+        displayName: displayName,
+        email: email,
+        userId: userId,
         partyId: '',
         publicKey: kp.publicKey,
         privateKey: kp.privateKey,
         fingerprint: fingerprint
       });
     }
-    console.log(JSON.stringify(wallets));
+    console.log(JSON.stringify({ partyHint: '$PARTY_HINT', wallets }));
   " 2>/dev/null) || KEYPAIRS_RAW=""
 
   if [ -z "$KEYPAIRS_RAW" ]; then
@@ -336,14 +428,16 @@ fi
 log ""
 log "Step 2: Onboarding $NUM_WALLETS external parties..."
 
-for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PUB=$(jq -r ".[$i].publicKey" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
+PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
 
-  EXPECTED_PARTY="$WALLET_HINT::$WALLET_FP"
+for i in $(seq 0 $((NUM_WALLETS - 1))); do
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PUB=$(jq -r ".wallets[$i].publicKey" "$KEYPAIRS_FILE")
+  WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
+  WALLET_FP=$(jq -r ".wallets[$i].fingerprint" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+
+  EXPECTED_PARTY="$PARTY_HINT_VALUE::$WALLET_FP"
 
   # Always verify the party exists on the participant (topology may be lost after restart)
   PARTY_CHECK=$(curl_check "$APP_USER_JSON_API/v2/parties/party?parties=$EXPECTED_PARTY" "$CANTON_TOKEN" "application/json" \
@@ -351,12 +445,12 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
   if [ -n "$PARTY_CHECK" ] && [ "$PARTY_CHECK" != "null" ]; then
     WALLET_PARTY="$PARTY_CHECK"
-    log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT already onboarded: ${WALLET_PARTY:0:40}..."
+    log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME already onboarded: ${WALLET_PARTY:0:40}..."
   else
     TOPO_BODY=$(jq -n \
       --arg sync "$SYNCHRONIZER_ID" \
       --arg keyData "$WALLET_PUB" \
-      --arg hint "$WALLET_HINT" \
+      --arg hint "$PARTY_HINT_VALUE" \
       '{
         synchronizer: $sync,
         publicKey: {
@@ -373,7 +467,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
     TOPO_RESULT=$(curl_check "$APP_USER_JSON_API/v2/parties/external/generate-topology" "$CANTON_TOKEN" "application/json" \
       --data-raw "$TOPO_BODY") || {
-      log_error "Failed to generate topology for $WALLET_HINT"
+      log_error "Failed to generate topology for $WALLET_NAME"
       exit 1
     }
 
@@ -383,7 +477,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     TOPO_TRANSACTIONS=$(echo "$TOPO_RESULT" | jq -c '.topologyTransactions // []')
 
     if [ -z "$MULTI_HASH" ] || [ -z "$TOPO_PARTY_ID" ] || [ -z "$PUB_KEY_FP" ]; then
-      log_error "generate-topology response missing required fields for $WALLET_HINT"
+      log_error "generate-topology response missing required fields for $WALLET_NAME"
       exit 1
     fi
 
@@ -394,7 +488,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     " 2>/dev/null) || SIGNED_HASH=""
 
     if [ -z "$SIGNED_HASH" ]; then
-      log_error "Failed to sign topology hash for $WALLET_HINT"
+      log_error "Failed to sign topology hash for $WALLET_NAME"
       exit 1
     fi
 
@@ -419,21 +513,21 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
     ALLOCATE_RESULT=$(curl_check "$APP_USER_JSON_API/v2/parties/external/allocate" "$CANTON_TOKEN" "application/json" \
       --data-raw "$ALLOCATE_BODY") || {
-      log_error "Failed to allocate external party $WALLET_HINT"
+      log_error "Failed to allocate external party $WALLET_NAME"
       exit 1
     }
 
     WALLET_PARTY=$(echo "$ALLOCATE_RESULT" | jq -r '.partyId // empty')
     if [ -z "$WALLET_PARTY" ]; then
-      log_error "Allocate succeeded but no partyId in response for $WALLET_HINT"
+      log_error "Allocate succeeded but no partyId in response for $WALLET_NAME"
       exit 1
     fi
 
-    log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT allocated: ${WALLET_PARTY:0:40}..."
+    log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME allocated: ${WALLET_PARTY:0:40}..."
   fi
 
   jq --arg idx "$i" --arg partyId "$WALLET_PARTY" \
-    '.[($idx | tonumber)].partyId = $partyId' "$KEYPAIRS_FILE" > "$KEYPAIRS_FILE.tmp" \
+    '.wallets[($idx | tonumber)].partyId = $partyId' "$KEYPAIRS_FILE" > "$KEYPAIRS_FILE.tmp" \
     && mv "$KEYPAIRS_FILE.tmp" "$KEYPAIRS_FILE"
 done
 
@@ -447,9 +541,8 @@ log ""
 log "Step 3: Creating Canton users and granting rights..."
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$i].userId" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
 
   curl_check "$APP_USER_JSON_API/v2/users/$SHARED_SECRET_USER/rights" "$CANTON_TOKEN" "application/json" \
     --data-raw '{
@@ -474,7 +567,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
           "metadata": {
             "resourceVersion": "",
             "annotations": {
-              "username": "'"$WALLET_HINT"'"
+              "username": "'"$WALLET_USER"'"
             }
           }
         },

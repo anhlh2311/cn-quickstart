@@ -52,7 +52,7 @@ if [ ! -f "$KEYPAIRS_FILE" ]; then
   echo "[faucet-amulet] Run 01-generate-user-wallet.sh first." >&2
   exit 1
 fi
-TOTAL_KEYPAIRS=$(jq 'length' "$KEYPAIRS_FILE")
+TOTAL_KEYPAIRS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 if [ -z "$NUM_WALLETS" ] || [ "$NUM_WALLETS" -gt "$TOTAL_KEYPAIRS" ]; then
   NUM_WALLETS="$TOTAL_KEYPAIRS"
 fi
@@ -424,12 +424,13 @@ log "Step 2: Tapping Amulet ($TAPS_PER_WALLET per wallet, $((NUM_WALLETS * TAPS_
 HOLDINGS=()
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_PRIV=$(jq -r ".[$i].privateKey" "$KEYPAIRS_FILE")
-  WALLET_FP=$(jq -r ".[$i].fingerprint" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
+  WALLET_FP=$(jq -r ".wallets[$i].fingerprint" "$KEYPAIRS_FILE")
 
-  log "  [$((i+1))/$NUM_WALLETS] $WALLET_HINT: tapping $TAPS_PER_WALLET times..."
+  log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME: tapping $TAPS_PER_WALLET times..."
 
   for j in $(seq 1 "$TAPS_PER_WALLET"); do
     AMOUNT=$(( (RANDOM % (MAX_AMOUNT - MIN_AMOUNT + 1)) + MIN_AMOUNT ))
@@ -454,8 +455,8 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       }]')
 
     TX_RESULT=$(interactive_submit "$CMD_JSON" "$WALLET_PARTY" "$WALLET_PRIV" "$WALLET_FP" \
-      "tap-${WALLET_HINT}-${j}" "$DISCLOSED_CONTRACTS") || {
-      log_error "Failed to tap Amulet #$j for $WALLET_HINT"
+      "tap-${WALLET_NAME}-${j}" "$DISCLOSED_CONTRACTS") || {
+      log_error "Failed to tap Amulet #$j for $WALLET_NAME"
       exit 1
     }
 
@@ -479,7 +480,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     fi
 
     if [ -z "$AMULET_CID" ]; then
-      log_error "Could not extract Amulet contract ID for $WALLET_HINT tap #$j"
+      log_error "Could not extract Amulet contract ID for $WALLET_NAME tap #$j"
       log_error "Response: $(echo "$TX_RESULT" | head -c 500)"
       exit 1
     fi
@@ -487,7 +488,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     HOLDINGS+=("${i}|${AMULET_CID}|${AMOUNT}")
   done
 
-  log "    Tapped $TAPS_PER_WALLET Amulet holdings for $WALLET_HINT"
+  log "    Tapped $TAPS_PER_WALLET Amulet holdings for $WALLET_NAME"
 done
 
 log "  Total Amulet holdings created: ${#HOLDINGS[@]}"
@@ -513,9 +514,9 @@ REPORT_JSON=$(jq -n \
   }')
 
 for i in $(seq 0 $((NUM_WALLETS - 1))); do
-  WALLET_HINT=$(jq -r ".[$i].partyHint" "$KEYPAIRS_FILE")
-  WALLET_PARTY=$(jq -r ".[$i].partyId" "$KEYPAIRS_FILE")
-  WALLET_USER=$(jq -r ".[$i].userId" "$KEYPAIRS_FILE")
+  WALLET_HINT=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
+  WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
+  WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
 
   WALLET_HOLDINGS="[]"
   WALLET_TOTAL=0
