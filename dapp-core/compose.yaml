@@ -1,0 +1,46 @@
+# dapp-core application services
+# Used together with Quickstart localnet modules via Makefile compose assembly
+
+services:
+  # Mount empty dars/ into splice-onboarding so upload_dars() doesn't fail
+  # (Quickstart mounts its custom licensing DAR here; we have none)
+  splice-onboarding:
+    volumes:
+      - ./dars:/canton/dars
+
+  wallet-gateway:
+    build:
+      context: .
+      dockerfile: docker/wallet-gateway/Dockerfile
+    container_name: wallet-gateway
+    volumes:
+      - ./gateway-config.json:/app/config.json
+    ports:
+      - "3030:3030"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dapp-core:
+    build:
+      context: .
+      dockerfile: docker/dapp-core/Dockerfile
+    container_name: dapp-core
+    env_file:
+      - ./docker/dapp-core/dapp-core.env
+    environment:
+      - GATEWAY_USER_API_URL=http://wallet-gateway:3030/api/v0/user
+      - GATEWAY_DAPP_API_URL=http://wallet-gateway:3030/api/v0/dapp
+      - PARTICIPANT_LEDGER_API_URL=http://canton:3975
+      - VALIDATOR_API_URL=http://splice:3903/api/validator
+      - DB_HOST=${DB_SERVER:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USERNAME=${DB_USER:-cnadmin}
+      - DB_PASSWORD=${DB_PASSWORD:-supersafe}
+    ports:
+      - "${DAPP_CORE_PORT:-3003}:3003"
+    depends_on:
+      wallet-gateway:
+        condition: service_started
+    restart: unless-stopped

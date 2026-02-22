@@ -42,3 +42,9 @@ gradle-app.setting
 .direnv/
 
 logs
+
+# Metals
+.metals/
+
+# Specstory
+.specstory/

@@ -1,0 +1,9 @@
+# Adds extra databases to the shared PostgreSQL instance (from localnet)
+# for wallet-gateway and dapp-core services
+
+services:
+  postgres:
+    environment:
+      - CREATE_DATABASE_wallet_store=wallet-store
+      - CREATE_DATABASE_signing_store=signing-store
+      - CREATE_DATABASE_dapp_core=dapp-core

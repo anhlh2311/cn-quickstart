@@ -1,0 +1,102 @@
+{
+  "kernel": {
+    "id": "dapp-gateway",
+    "clientType": "remote"
+  },
+  "server": {
+    "port": 3030,
+    "dappPath": "/api/v0/dapp",
+    "userPath": "/api/v0/user",
+    "allowedOrigins": "*"
+  },
+  "store": {
+    "connection": {
+      "type": "postgres",
+      "host": "postgres",
+      "port": 5432,
+      "user": "cnadmin",
+      "password": "supersafe",
+      "database": "wallet-store"
+    },
+    "idps": [
+      {
+        "id": "idp-self-signed",
+        "type": "self_signed",
+        "issuer": "unsafe-auth"
+      }
+    ],
+    "networks": [
+      {
+        "id": "canton:localnet",
+        "name": "Localnet",
+        "description": "Local Canton Network (Quickstart)",
+        "identityProviderId": "idp-self-signed",
+        "auth": {
+          "method": "self_signed",
+          "issuer": "self-signed",
+          "clientId": "ledger-api-user",
+          "clientSecret": "unsafe",
+          "audience": "https://canton.network.global",
+          "scope": "openid daml_ledger_api offline_access"
+        },
+        "adminAuth": {
+          "method": "self_signed",
+          "issuer": "self-signed",
+          "clientId": "ledger-api-user",
+          "clientSecret": "unsafe",
+          "audience": "https://canton.network.global",
+          "scope": "daml_ledger_api"
+        },
+        "ledgerApi": {
+          "baseUrl": "http://canton:3975"
+        }
+      }
+    ]
+  },
+  "signingStore": {
+    "connection": {
+      "type": "postgres",
+      "host": "postgres",
+      "port": 5432,
+      "user": "cnadmin",
+      "password": "supersafe",
+      "database": "signing-store"
+    }
+  },
+  "bootstrap": {
+    "idps": [
+      {
+        "id": "idp-self-signed",
+        "type": "self_signed",
+        "issuer": "unsafe-auth"
+      }
+    ],
+    "networks": [
+      {
+        "id": "canton:localnet",
+        "name": "Localnet",
+        "description": "Local Canton Network (Quickstart)",
+        "identityProviderId": "idp-self-signed",
+        "auth": {
+          "method": "self_signed",
+          "issuer": "self-signed",
+          "clientId": "ledger-api-user",
+          "clientSecret": "unsafe",
+          "audience": "https://canton.network.global",
+          "scope": "openid daml_ledger_api offline_access"
+        },
+        "adminAuth": {
+          "method": "self_signed",
+          "issuer": "self-signed",
+          "clientId": "ledger-api-user",
+          "clientSecret": "unsafe",
+          "audience": "https://canton.network.global",
+          "scope": "daml_ledger_api"
+        },
+        "ledgerApi": {
+          "baseUrl": "http://canton:3975"
+        }
+      }
+    ]
+  }
+}
