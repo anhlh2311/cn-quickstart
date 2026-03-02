@@ -7,3 +7,4 @@ services:
       - CREATE_DATABASE_wallet_store=wallet-store
       - CREATE_DATABASE_signing_store=signing-store
       - CREATE_DATABASE_dapp_core=dapp-core
+      - CREATE_DATABASE_token_issuer=token-issuer

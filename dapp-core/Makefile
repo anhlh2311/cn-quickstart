@@ -218,6 +218,25 @@ sync-modules: ## Sync infrastructure modules from Quickstart (run after Quicksta
 	cp -r "$$QUICKSTART_DIR/docker/modules/pqs" docker/modules/; \
 	echo "Done. Synced localnet, splice-onboarding, pqs modules."
 
+# ── Token Issuer (separate sidekick service) ─────────────────────────────────
+
+.PHONY: start-token-issuer
+start-token-issuer: docker-available ## Start token-issuer container (requires infra to be running)
+	$(call docker-compose, up -d --build --no-recreate token-issuer)
+
+.PHONY: stop-token-issuer
+stop-token-issuer: docker-available ## Stop token-issuer container
+	$(call docker-compose, rm -s -f token-issuer)
+
+.PHONY: restart-token-issuer
+restart-token-issuer: docker-available ## Rebuild and restart token-issuer
+	$(call docker-compose, rm -s -f token-issuer)
+	$(call docker-compose, up -d --build --no-recreate token-issuer)
+
+.PHONY: logs-token-issuer
+logs-token-issuer: docker-available ## Follow token-issuer logs
+	$(call docker-compose, logs -f token-issuer)
+
 # ── Setup contracts ─────────────────────────────────────────────────────────
 
 .PHONY: setup-featured-app
@@ -261,6 +280,12 @@ help: ## Show this help
 	@printf "\033[1mClean\033[0m:\n"
 	@printf "  \033[36mclean\033[0m                     Stop all containers and remove volumes\n"
 	@printf "  \033[36mclean-app\033[0m                 Stop and remove only app containers (keep infra)\n"
+	@printf "\n"
+	@printf "\033[1mToken Issuer\033[0m (sidekick service for testing):\n"
+	@printf "  \033[36mstart-token-issuer\033[0m        Start token-issuer container\n"
+	@printf "  \033[36mstop-token-issuer\033[0m         Stop token-issuer container\n"
+	@printf "  \033[36mrestart-token-issuer\033[0m      Rebuild and restart token-issuer\n"
+	@printf "  \033[36mlogs-token-issuer\033[0m         Follow token-issuer logs\n"
 	@printf "\n"
 	@printf "\033[1mMaintenance\033[0m:\n"
 	@printf "  \033[36msync-modules\033[0m              Sync infrastructure modules from Quickstart\n"

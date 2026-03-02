@@ -44,3 +44,23 @@ services:
       wallet-gateway:
         condition: service_started
     restart: unless-stopped
+
+  token-issuer:
+    build:
+      context: ./token-issuer
+      dockerfile: Dockerfile
+    container_name: token-issuer
+    env_file:
+      - ./token-issuer/token-issuer.env
+    environment:
+      - PARTICIPANT_LEDGER_API_URL=http://canton:3975
+      - DB_HOST=${DB_SERVER:-postgres}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USERNAME=${DB_USER:-cnadmin}
+      - DB_PASSWORD=${DB_PASSWORD:-supersafe}
+    ports:
+      - "${TOKEN_ISSUER_PORT:-3004}:3004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
