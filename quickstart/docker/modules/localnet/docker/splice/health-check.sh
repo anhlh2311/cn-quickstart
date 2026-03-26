@@ -15,3 +15,6 @@ if [ "$SV_PROFILE" = "on" ]; then
   curl -f http://localhost:5012/api/scan/readyz
   curl -f http://localhost:5014/api/sv/readyz
 fi
+if [ "$TRADING_PARTNER_PROFILE" = "on" ]; then
+  curl -f "http://localhost:1${VALIDATOR_ADMIN_API_PORT_SUFFIX}/api/validator/readyz"
+fi

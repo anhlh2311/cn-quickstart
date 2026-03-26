@@ -228,43 +228,13 @@ if [ -z "$DSO_PARTY" ]; then
 fi
 
 ##############################################################################
-# Step 2: Verify Amulet allocation factory is accessible (dynamic)
+# Step 2: Register Amulet token issuer in backend (POST /token-issuer)
+# Note: Amulet's allocation factory (ExternalPartyAmuletRules) is fetched
+# dynamically from scan-proxy at runtime — no factory data stored in DB.
 ##############################################################################
 
 log ""
-log "Step 2: Verifying Amulet allocation factory is accessible..."
-
-# The backend fetches Amulet factory contracts dynamically from the validator's
-# scan-proxy registry endpoint. Verify it works by calling the backend API.
-FACTORY_RESPONSE=$(curl -sf "$BACKEND_URL/allocation-factory/type/amulet" \
-  -H "Authorization: Bearer $BACKEND_TOKEN" 2>/dev/null || echo "")
-
-if [ -n "$FACTORY_RESPONSE" ]; then
-  # Check if the response has the expected structure
-  FACTORY_ID=$(echo "$FACTORY_RESPONSE" | jq -r '.data.factoryId // .factoryId // empty' 2>/dev/null || echo "")
-  DISCLOSED_COUNT=$(echo "$FACTORY_RESPONSE" | jq -r '.data.choiceContext.disclosedContracts | length // 0' 2>/dev/null || echo "0")
-
-  if [ -n "$FACTORY_ID" ]; then
-    log "  Amulet allocation factory is accessible (dynamic from scan-proxy)"
-    log "  Factory ID (ExternalPartyAmuletRules): ${FACTORY_ID:0:40}..."
-    log "  Disclosed contracts: $DISCLOSED_COUNT"
-  else
-    log "  WARNING: Amulet allocation factory response missing factoryId"
-    log "  Response: $(echo "$FACTORY_RESPONSE" | head -c 300)"
-    log "  Continuing anyway — the factory may become available after network stabilizes"
-  fi
-else
-  log "  WARNING: Could not reach Amulet allocation factory endpoint"
-  log "  This is expected if the scan-proxy is not yet ready"
-  log "  Continuing with token issuer registration..."
-fi
-
-##############################################################################
-# Step 3: Register Amulet token issuer in backend (POST /token-issuer)
-##############################################################################
-
-log ""
-log "Step 3: Registering Amulet token issuer in backend..."
+log "Step 2: Registering Amulet token issuer in backend..."
 
 # Check if already registered
 EXISTING_ISSUER=$(curl -sf "$BACKEND_URL/token-issuer/token/$AMULET_TOKEN_ID" \
@@ -338,9 +308,8 @@ log "  Token ID: $AMULET_TOKEN_ID"
 log "  Symbol: $AMULET_SYMBOL"
 log "  Display name: $AMULET_DISPLAY_NAME"
 log ""
-log "Note: Amulet allocation factory is dynamic — fetched from the validator's"
-log "scan-proxy registry at runtime. No allocation-factory DB entry is needed."
+log "Note: Amulet allocation factory (ExternalPartyAmuletRules) is dynamic —"
+log "fetched from the validator's scan-proxy registry at runtime."
 log ""
 log "Verify:"
 log "  curl -s $BACKEND_URL/token-issuer/token/$AMULET_TOKEN_ID -H 'Authorization: Bearer <token>' | jq"
-log "  curl -s $BACKEND_URL/allocation-factory/type/amulet -H 'Authorization: Bearer <token>' | jq"

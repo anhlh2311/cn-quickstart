@@ -10,6 +10,10 @@ x-vars:
     path: ${APP_USER_AUTH_ENV}
     required: false
 
+  trading-partner-auth-env: &trading-partner-auth-env
+    path: ${TRADING_PARTNER_AUTH_ENV}
+    required: false
+
 volumes:
   onboarding:
 
@@ -21,6 +25,7 @@ services:
       - ${LOCALNET_ENV_DIR}/common.env
       - *app-provider-auth-env
       - *app-user-auth-env
+      - *trading-partner-auth-env
     environment:
       - AUTH_MODE=${AUTH_MODE}
       - TEST_MODE=${TEST_MODE}
@@ -30,6 +35,7 @@ services:
       - ${MODULES_DIR}/splice-onboarding/docker/utils.sh:/app/utils.sh
       - ${MODULES_DIR}/splice-onboarding/docker/app-provider.sh:/app/app-provider-auth.sh
       - ${MODULES_DIR}/splice-onboarding/docker/app-user.sh:/app/app-user-auth.sh
+      - ${MODULES_DIR}/splice-onboarding/docker/trading-partner.sh:/app/trading-partner-auth.sh
       - onboarding:/onboarding
     healthcheck:
       test: ["CMD", "bash", "/app/health-check.sh"]

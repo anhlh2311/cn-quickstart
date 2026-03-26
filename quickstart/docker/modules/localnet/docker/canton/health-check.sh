@@ -16,3 +16,7 @@ if [ "$SV_PROFILE" = "on" ]; then
   echo "Checking 4${CANTON_GRPC_HEALTHCHECK_PORT_SUFFIX}"
   grpcurl -plaintext "localhost:4${CANTON_GRPC_HEALTHCHECK_PORT_SUFFIX}" grpc.health.v1.Health/Check
 fi
+if [ "$TRADING_PARTNER_PROFILE" = "on" ]; then
+  echo "Checking 1${CANTON_GRPC_HEALTHCHECK_PORT_SUFFIX}"
+  grpcurl -plaintext "localhost:1${CANTON_GRPC_HEALTHCHECK_PORT_SUFFIX}" grpc.health.v1.Health/Check
+fi

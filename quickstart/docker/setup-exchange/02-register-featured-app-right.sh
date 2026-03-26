@@ -336,6 +336,10 @@ REGISTER_BODY=$(jq -n \
   --arg validator "$APP_USER_PARTY" \
   --arg type "$FEATURE_APP_RIGHT_TYPE" \
   --arg beneficiary "$APP_USER_PARTY" \
+  --arg disclosureCid "$FEATURED_APP_RIGHT_CID" \
+  --arg disclosureTemplate "$FAR_TEMPLATE_HASH" \
+  --arg disclosureBlob "$FAR_BLOB" \
+  --arg disclosureSyncId "$SYNCHRONIZER_ID" \
   '{
     featuredAppRightCid: $cid,
     validator: $validator,
@@ -343,7 +347,13 @@ REGISTER_BODY=$(jq -n \
     beneficiaries: [{
       beneficiary: $beneficiary,
       weight: "1.0"
-    }]
+    }],
+    disclosedContract: {
+      contractId: $disclosureCid,
+      templateId: $disclosureTemplate,
+      createdEventBlob: $disclosureBlob,
+      synchronizerId: $disclosureSyncId
+    }
   }')
 
 REGISTER_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/feature-app-right" \

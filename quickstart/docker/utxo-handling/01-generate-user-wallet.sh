@@ -1,19 +1,34 @@
 #!/bin/bash
-# Generates 25 "user wallet" external parties on the Canton Network.
+# Generates "user wallet" external parties on the Canton Network.
 #
 # This script:
-#   1. Generates 25 Ed25519 keypairs (NaCl format)
-#   2. Onboards 25 external parties via generate-topology + sign + allocate
-#   3. Creates 25 Canton users with ActAs/ReadAs rights
+#   1. Generates Ed25519 keypairs (NaCl format)
+#   2. Onboards external parties via generate-topology + sign + allocate
+#   3. Creates Canton users with ActAs/ReadAs rights
 #
 # After running this script, use 02-request-minting-cbtc.sh or 03-request-faucet-amulet.sh
 # to mint tokens for the user wallets.
+#
+# Environment variables:
+#   NUM_WALLETS       — Number of wallets to generate (default: 25)
+#   PARTY_HINT        — Party hint for all wallets (default: kairo)
+#   APPEND_WALLETS    — Set to "true" to append new wallets to existing keypairs
+#                       file instead of overwriting. New wallets get indices
+#                       continuing from the last existing wallet. (default: false)
+#   ONBOARD_ONLY      — Set to "true" to skip keypair generation and only run
+#                       onboarding (Step 2) and user creation (Step 3) from the
+#                       existing keypairs file. NUM_WALLETS and APPEND_WALLETS
+#                       are ignored. (default: false)
 #
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
 #   - 01-setup-exchange.sh must have been run (DARs uploaded)
 #
-# Usage: ./01-generate-user-wallet.sh
+# Usage:
+#   ./01-generate-user-wallet.sh                          # Generate 25 wallets (overwrite)
+#   NUM_WALLETS=5 ./01-generate-user-wallet.sh            # Generate 5 wallets (overwrite)
+#   APPEND_WALLETS=true NUM_WALLETS=10 ./01-generate-user-wallet.sh  # Add 10 more wallets
+#   ONBOARD_ONLY=true ./01-generate-user-wallet.sh        # Onboard from existing keypairs file
 
 set -eo pipefail
 
@@ -31,6 +46,11 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 NUM_WALLETS="${NUM_WALLETS:-25}"
 PARTY_HINT="${PARTY_HINT:-kairo}"
+# Set APPEND_WALLETS=true to add wallets to existing keypairs file instead of overwriting
+APPEND_WALLETS="${APPEND_WALLETS:-false}"
+# Set ONBOARD_ONLY=true to skip keypair generation and only onboard/create users
+# from the existing keypairs file. NUM_WALLETS and APPEND_WALLETS are ignored.
+ONBOARD_ONLY="${ONBOARD_ONLY:-false}"
 
 # Load shared configuration from setup-exchange .env
 if [ ! -f "$SETUP_DIR/.env" ]; then
@@ -243,7 +263,12 @@ interactive_submit() {
 log "=========================================="
 log "Generate User Wallets"
 log "=========================================="
-log "  Wallets: $NUM_WALLETS"
+if [ "$ONBOARD_ONLY" = "true" ]; then
+  log "  Mode: onboard-only (skip keypair generation)"
+else
+  log "  Wallets: $NUM_WALLETS"
+  log "  Append mode: $APPEND_WALLETS"
+fi
 log ""
 
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
@@ -258,38 +283,82 @@ fi
 log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
 
 ##############################################################################
-# Clean up downstream JSON files from previous runs
+# ONBOARD_ONLY mode: validate keypairs file and skip to Step 2
 ##############################################################################
 
-log "Cleaning up downstream JSON files from previous runs..."
-CLEANUP_FILES=(
-  "$SCRIPT_DIR/user-wallet-holdings-cbtc.json"
-  "$SCRIPT_DIR/user-wallet-holdings-amulet.json"
-  "$SCRIPT_DIR/user-wallet-merge-delegation.json"
-  "$SCRIPT_DIR/user-wallet-merged-holdings-cbtc.json"
-  "$SCRIPT_DIR/user-wallet-merged-holdings-amulet.json"
-)
-for f in "${CLEANUP_FILES[@]}"; do
-  if [ -f "$f" ]; then
-    rm -f "$f"
-    log "  Removed $(basename "$f")"
+if [ "$ONBOARD_ONLY" = "true" ]; then
+  if [ ! -f "$KEYPAIRS_FILE" ]; then
+    log_error "ONBOARD_ONLY=true but keypairs file not found: $KEYPAIRS_FILE"
+    exit 1
   fi
-done
-log "  Cleanup done."
+
+  # Validate the keypairs file structure
+  if ! jq -e '[
+    .partyHint, (.wallets | type == "array"), (.wallets | length > 0),
+    (.wallets[0] | has("publicKey", "privateKey", "fingerprint", "userId"))
+  ] | all' "$KEYPAIRS_FILE" > /dev/null 2>&1; then
+    log_error "ONBOARD_ONLY=true but keypairs file is invalid or empty."
+    log_error "Expected: { partyHint, wallets: [{ publicKey, privateKey, fingerprint, userId, ... }] }"
+    exit 1
+  fi
+
+  TOTAL_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
+  log "Onboard-only mode: found $TOTAL_WALLETS wallets in $KEYPAIRS_FILE"
+  log "Skipping cleanup and keypair generation (Steps 0-1)."
+else
 
 ##############################################################################
-# Step 1: Generate 25 Ed25519 keypairs (idempotent)
+# Clean up downstream JSON files from previous runs (skip in append mode)
+##############################################################################
+
+if [ "$APPEND_WALLETS" != "true" ]; then
+  log "Cleaning up downstream JSON files from previous runs..."
+  CLEANUP_FILES=(
+    "$SCRIPT_DIR/user-wallet-holdings-cbtc.json"
+    "$SCRIPT_DIR/user-wallet-holdings-amulet.json"
+    "$SCRIPT_DIR/user-wallet-merge-delegation.json"
+    "$SCRIPT_DIR/user-wallet-merged-holdings-cbtc.json"
+    "$SCRIPT_DIR/user-wallet-merged-holdings-amulet.json"
+  )
+  for f in "${CLEANUP_FILES[@]}"; do
+    if [ -f "$f" ]; then
+      rm -f "$f"
+      log "  Removed $(basename "$f")"
+    fi
+  done
+  log "  Cleanup done."
+else
+  log "Append mode: skipping downstream JSON cleanup."
+fi
+
+##############################################################################
+# Step 1: Generate Ed25519 keypairs
+# In append mode (APPEND_WALLETS=true), new wallets are added to the existing
+# keypairs file. The starting index continues from the last wallet.
 ##############################################################################
 
 log ""
-log "Step 1: Generating $NUM_WALLETS keypairs..."
 
-if [ -f "$KEYPAIRS_FILE" ]; then
-  log "  Deleting existing keypairs file (fresh random names each run)"
-  rm -f "$KEYPAIRS_FILE"
+# Determine starting index and existing names for deduplication
+EXISTING_COUNT=0
+EXISTING_NAMES_JSON="[]"
+if [ "$APPEND_WALLETS" = "true" ] && [ -f "$KEYPAIRS_FILE" ]; then
+  EXISTING_COUNT=$(jq '.wallets | length' "$KEYPAIRS_FILE")
+  EXISTING_NAMES_JSON=$(jq '[.wallets[].displayName]' "$KEYPAIRS_FILE")
+  log "Step 1: Appending $NUM_WALLETS keypairs to existing $EXISTING_COUNT wallets..."
+else
+  if [ -f "$KEYPAIRS_FILE" ]; then
+    log "Step 1: Overwriting existing keypairs file with $NUM_WALLETS new keypairs..."
+    rm -f "$KEYPAIRS_FILE"
+  else
+    log "Step 1: Generating $NUM_WALLETS keypairs..."
+  fi
 fi
 
-if [ ! -f "$KEYPAIRS_FILE" ]; then
+START_INDEX=$EXISTING_COUNT
+
+if [ "$APPEND_WALLETS" != "true" ] || [ ! -f "$KEYPAIRS_FILE" ]; then
+  # Fresh generation — create all wallets from scratch
   KEYPAIRS_RAW=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
     const { createKeyPair } = require('@canton-network/core-signing-lib');
     const crypto = require('crypto');
@@ -419,18 +488,145 @@ if [ ! -f "$KEYPAIRS_FILE" ]; then
 
   echo "$KEYPAIRS_RAW" | jq '.' > "$KEYPAIRS_FILE"
   log "  Generated $NUM_WALLETS keypairs -> $KEYPAIRS_FILE"
+else
+  # Append mode — generate new wallets and merge into existing file
+  EXISTING_NAMES_JSON=$(jq '[.wallets[].displayName]' "$KEYPAIRS_FILE")
+
+  NEW_WALLETS_RAW=$(cd "$EXCHANGE_BACKEND_DIR" && node -e "
+    const { createKeyPair } = require('@canton-network/core-signing-lib');
+    const crypto = require('crypto');
+
+    const existingNames = new Set($EXISTING_NAMES_JSON);
+    const startIndex = $START_INDEX;
+
+    const names = {
+      european: {
+        first: [
+          'Emma','Liam','Sofia','Lucas','Isabella','Felix','Olivia','Hugo','Mia','Alexander',
+          'Charlotte','Leo','Elena','Oscar','Anna','Henrik','Julia','Max','Amelia','Noah',
+          'Elise','Sebastian','Clara','Adrian','Nora','Viktor','Ingrid','Marco','Isla','Emil',
+          'Lucia','Matteo','Freya','Anton','Sophie','Erik','Lara','Florian','Hanna','Gabriel',
+          'Valentina','Lukas','Stella','Theo','Aurora','Nikolai','Emilia','Rafael','Klara','Stefan'
+        ],
+        last: [
+          'Mueller','Schmidt','Dubois','Martin','Rossi','Bianchi','Larsson','Nielsen','Kowalski','Novak',
+          'Garcia','Petrov','Fischer','Weber','Silva','Bergman','Laurent','Olsen','Koenig','Baxter',
+          'Johansson','Moretti','Richter','Dupont','Fernandez','Hoffmann','Andersen','Eriksson','Szabo','Wolf',
+          'Brandt','Leroy','Costa','Mancini','Jansen','Scholz','Persson','Lindberg','Kraemer','Morel',
+          'Kovacs','Santoro','Brennan','Vogel','Lehmann','Gruber','Berger','Hartmann','Klein','Fuchs'
+        ]
+      },
+      chinese: {
+        first: [
+          'Wei','Jing','Ming','Hua','Yan','Jun','Lei','Xin','Fang','Yong',
+          'Hao','Tao','Qian','Rui','Bo','Zhen','Kai','Yi','Cheng','Shuang',
+          'Wai','Siu','Tsz','Lok','Yin','Pak','Cheuk','Wing','Ting','Kwok',
+          'Beng','Hock','Kian','Seng','Chuan','Leng','Swee','Gek','Poh','Teck',
+          'Guan','Lian','Seow','Chye','Keng','Gim','Peng','Huay','Boon','Geok'
+        ],
+        last: [
+          'Wang','Li','Zhang','Liu','Chen','Yang','Huang','Zhou','Wu','Xu',
+          'Sun','Ma','Zhu','Gao','Lin','He','Guo','Luo','Song','Deng',
+          'Wong','Chan','Lau','Leung','Cheung','Ng','Tang','Lam','Chow','Yip',
+          'Fung','Kwong','Tse','Mak','Tam',
+          'Tan','Lim','Ong','Koh','Goh','Teo','Sim','Chua','Chia','Tay',
+          'Ang','Yeo','Foo','Khoo','Seah'
+        ]
+      },
+      vietnamese: {
+        first: [
+          'Minh','Anh','Hoa','Duc','Linh','Tuan','Lan','Phong','Mai','Hung',
+          'Thanh','Binh','Thao','Cuong','Vy','Khoa','Ngoc','Trang','Quang','Khanh',
+          'Hien','Trung','Thuy','Dung','Tien','Nhan','Phuong','Tam','Vinh','Hau',
+          'Bao','Diem','Gia','Huy','Kim','Long','My','Nam','Oanh','Phuc',
+          'Quyen','Son','Thien','Uyen','Van','Xuan','Yen','Dat','Hanh','Lam'
+        ],
+        last: [
+          'Nguyen','Tran','Le','Pham','Hoang','Vu','Dang','Bui','Do','Ho',
+          'Ngo','Duong','Ly','Truong','Dinh','Luu','Trinh','Ta','Cao','Lam',
+          'Luong','Doan','Phan','Ha','Mai','Chau','Tong','La','Quach','Nham',
+          'Nghiem','Dao','Vuong','Tieu','Bach','Phung','Chu','Trieu','Khuu','Huynh',
+          'Ton','Thach','Dam','Thai','Lac','Kieu','Mach','Trang','Linh','Au'
+        ]
+      }
+    };
+    const cultures = Object.keys(names);
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    const randChars = () => {
+      const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.';
+      const len = 4 + Math.floor(Math.random() * 5);
+      let s = '';
+      for (let j = 0; j < len; j++) s += chars[Math.floor(Math.random() * chars.length)];
+      return s.replace(/^\\\\./,'a').replace(/\\\\.$/,'z').replace(/\\\\.{2,}/g,'.');
+    };
+    const asianLast = [...names.chinese.last, ...names.vietnamese.last];
+    const pickName = () => {
+      if (Math.random() < 0.3) {
+        return { first: pick(names.european.first), last: pick(asianLast) };
+      }
+      const pool = names[pick(cultures)];
+      return { first: pick(pool.first), last: pick(pool.last) };
+    };
+
+    const usedNames = new Set(existingNames);
+    const wallets = [];
+    for (let i = 0; i < $NUM_WALLETS; i++) {
+      let displayName;
+      do {
+        const { first, last } = pickName();
+        displayName = first + ' ' + last;
+      } while (usedNames.has(displayName));
+      usedNames.add(displayName);
+
+      const namePart = displayName.toLowerCase().replace(/ /g, '.');
+      const email = namePart + '.' + randChars() + '@gmail.com';
+      const userId = displayName.toLowerCase().replace(/ /g, '-');
+
+      const kp = createKeyPair();
+      const pubKeyBytes = Buffer.from(kp.publicKey, 'base64');
+      const hashInput = Buffer.alloc(4 + pubKeyBytes.length);
+      hashInput.writeUInt32BE(12, 0);
+      pubKeyBytes.copy(hashInput, 4);
+      const hash = crypto.createHash('sha256').update(hashInput).digest();
+      const fingerprint = Buffer.concat([Buffer.from([0x12, 0x20]), hash]).toString('hex');
+      wallets.push({
+        index: startIndex + i,
+        displayName, email, userId,
+        partyId: '',
+        publicKey: kp.publicKey,
+        privateKey: kp.privateKey,
+        fingerprint
+      });
+    }
+    console.log(JSON.stringify(wallets));
+  " 2>/dev/null) || NEW_WALLETS_RAW=""
+
+  if [ -z "$NEW_WALLETS_RAW" ]; then
+    log_error "Failed to generate keypairs. Ensure Node.js and @canton-network/core-signing-lib are available."
+    exit 1
+  fi
+
+  # Merge new wallets into existing file
+  jq --argjson newWallets "$NEW_WALLETS_RAW" '.wallets += $newWallets' "$KEYPAIRS_FILE" > "$KEYPAIRS_FILE.tmp" \
+    && mv "$KEYPAIRS_FILE.tmp" "$KEYPAIRS_FILE"
+  log "  Appended $NUM_WALLETS keypairs (indices $START_INDEX-$((START_INDEX + NUM_WALLETS - 1))) -> $KEYPAIRS_FILE"
 fi
+
+# Update NUM_WALLETS to reflect total count for onboarding/user-creation steps
+TOTAL_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
+
+fi  # end of ONBOARD_ONLY=false block (cleanup + Step 1)
 
 ##############################################################################
 # Step 2: Onboard external parties via generate-topology + sign + allocate
 ##############################################################################
 
 log ""
-log "Step 2: Onboarding $NUM_WALLETS external parties..."
+log "Step 2: Onboarding $TOTAL_WALLETS external parties..."
 
 PARTY_HINT_VALUE=$(jq -r '.partyHint' "$KEYPAIRS_FILE")
 
-for i in $(seq 0 $((NUM_WALLETS - 1))); do
+for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
   WALLET_NAME=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PUB=$(jq -r ".wallets[$i].publicKey" "$KEYPAIRS_FILE")
   WALLET_PRIV=$(jq -r ".wallets[$i].privateKey" "$KEYPAIRS_FILE")
@@ -445,7 +641,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
 
   if [ -n "$PARTY_CHECK" ] && [ "$PARTY_CHECK" != "null" ]; then
     WALLET_PARTY="$PARTY_CHECK"
-    log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME already onboarded: ${WALLET_PARTY:0:40}..."
+    log "  [$((i+1))/$TOTAL_WALLETS] $WALLET_NAME already onboarded: ${WALLET_PARTY:0:40}..."
   else
     TOPO_BODY=$(jq -n \
       --arg sync "$SYNCHRONIZER_ID" \
@@ -523,7 +719,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       exit 1
     fi
 
-    log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME allocated: ${WALLET_PARTY:0:40}..."
+    log "  [$((i+1))/$TOTAL_WALLETS] $WALLET_NAME allocated: ${WALLET_PARTY:0:40}..."
   fi
 
   jq --arg idx "$i" --arg partyId "$WALLET_PARTY" \
@@ -531,7 +727,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
     && mv "$KEYPAIRS_FILE.tmp" "$KEYPAIRS_FILE"
 done
 
-log "  All $NUM_WALLETS external parties onboarded."
+log "  All $TOTAL_WALLETS external parties onboarded."
 
 ##############################################################################
 # Step 3: Create Canton users + grant rights
@@ -540,7 +736,7 @@ log "  All $NUM_WALLETS external parties onboarded."
 log ""
 log "Step 3: Creating Canton users and granting rights..."
 
-for i in $(seq 0 $((NUM_WALLETS - 1))); do
+for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
   WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
 
@@ -585,10 +781,10 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
       ]
     }' > /dev/null 2>&1 || true
 
-  log "  [$((i+1))/$NUM_WALLETS] User $WALLET_USER created with rights"
+  log "  [$((i+1))/$TOTAL_WALLETS] User $WALLET_USER created with rights"
 done
 
-log "  All $NUM_WALLETS users created."
+log "  All $TOTAL_WALLETS users created."
 
 ##############################################################################
 # Done
@@ -600,7 +796,12 @@ log "User Wallet Generation Complete!"
 log "=========================================="
 log ""
 log "Summary:"
-log "  Wallets created: $NUM_WALLETS"
+if [ "$ONBOARD_ONLY" = "true" ]; then
+  log "  Mode: onboard-only (no keypairs generated)"
+else
+  log "  New wallets generated: $NUM_WALLETS"
+fi
+log "  Total wallets in file: $TOTAL_WALLETS"
 log "  Keypairs file: $KEYPAIRS_FILE"
 log ""
 log "Next steps:"
