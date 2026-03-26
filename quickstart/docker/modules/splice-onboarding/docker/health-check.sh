@@ -36,6 +36,14 @@ if [ ! -f /tmp/all-done ]; then
     fi
   fi
 
+  if [ "$TRADING_PARTNER_PROFILE" == "on" ]; then
+    source /app/trading-partner-auth.sh
+    if [ "$DO_INIT" == "true" ] && [ ! -f /tmp/trading-partner-init-dars-uploaded ]; then
+      upload_dars "$TRADING_PARTNER_PARTICIPANT_ADMIN_TOKEN" "canton:1${PARTICIPANT_JSON_API_PORT_SUFFIX}"
+      touch /tmp/trading-partner-init-dars-uploaded
+    fi
+  fi
+
   echo "Executing onboarding scripts..." >&2
 
   for script in $(ls "$ONBOARDING_SCRIPTS_DIR"); do

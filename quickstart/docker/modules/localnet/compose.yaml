@@ -17,6 +17,10 @@ x-vars:
     path: ${SV_AUTH_ENV}
     required: false
 
+  trading-partner-auth-env: &trading-partner-auth-env
+    path: ${TRADING_PARTNER_AUTH_ENV}
+    required: false
+
 volumes:
   postgres:
   domain-upgrade-dump:
@@ -57,6 +61,7 @@ services:
       - app-provider
       - app-user
       - sv
+      - trading-partner
 
   nginx:
     image: "nginx:${NGINX_VERSION}"
@@ -68,8 +73,10 @@ services:
       - ${LOCALNET_DIR}/conf/nginx/app-provider.conf:/etc/nginx/templates/app-provider.c${APP_PROVIDER_PROFILE}f.template
       - ${LOCALNET_DIR}/conf/nginx/app-user.conf:/etc/nginx/templates/app-user.c${APP_USER_PROFILE}f.template
       - ${LOCALNET_DIR}/conf/nginx/sv.conf:/etc/nginx/templates/sv.c${SV_PROFILE}f.template
+      - ${LOCALNET_DIR}/conf/nginx/trading-partner.conf:/etc/nginx/templates/trading-partner.c${TRADING_PARTNER_PROFILE}f.template
       - ${LOCALNET_DIR}/conf/nginx/swagger-ui:/etc/nginx/includes
     ports:
+      - "${HOST_BIND_IP:-127.0.0.1}:${TRADING_PARTNER_UI_PORT}:${TRADING_PARTNER_UI_PORT}"
       - "${HOST_BIND_IP:-127.0.0.1}:${SV_UI_PORT}:${SV_UI_PORT}"
       - "${HOST_BIND_IP:-127.0.0.1}:${APP_PROVIDER_UI_PORT}:${APP_PROVIDER_UI_PORT}"
       - "${HOST_BIND_IP:-127.0.0.1}:${APP_USER_UI_PORT}:${APP_USER_UI_PORT}"
@@ -83,6 +90,9 @@ services:
       wallet-web-ui-app-user:
         condition: service_healthy
         required: false
+      wallet-web-ui-trading-partner:
+        condition: service_healthy
+        required: false
       splice:
         condition: service_healthy
     restart: always
@@ -90,6 +100,7 @@ services:
       - app-provider
       - app-user
       - sv
+      - trading-partner
 
   canton:
     image: "${IMAGE_REPO}canton:${IMAGE_TAG}"
@@ -98,6 +109,7 @@ services:
       - *app-provider-auth-env
       - *app-user-auth-env
       - *sv-auth-env
+      - *trading-partner-auth-env
     container_name: canton
     volumes:
       - ${LOCALNET_DIR}/docker/canton/health-check.sh:/app/health-check.sh
@@ -105,6 +117,7 @@ services:
       - ${LOCALNET_DIR}/conf/canton/app-provider:/app/app-provider/${APP_PROVIDER_PROFILE}
       - ${LOCALNET_DIR}/conf/canton/app-user:/app/app-user/${APP_USER_PROFILE}
       - ${LOCALNET_DIR}/conf/canton/sv:/app/sv/${SV_PROFILE}
+      - ${LOCALNET_DIR}/conf/canton/trading-partner:/app/trading-partner/${TRADING_PARTNER_PROFILE}
     ports:
       - "${TEST_PORT-4$PARTICIPANT_LEDGER_API_PORT_SUFFIX:}4${PARTICIPANT_LEDGER_API_PORT_SUFFIX}"
       - "${TEST_PORT-4$PARTICIPANT_ADMIN_API_PORT_SUFFIX:}4${PARTICIPANT_ADMIN_API_PORT_SUFFIX}"
@@ -115,6 +128,9 @@ services:
       - "${TEST_PORT-2$PARTICIPANT_LEDGER_API_PORT_SUFFIX:}2${PARTICIPANT_LEDGER_API_PORT_SUFFIX}"
       - "${TEST_PORT-2$PARTICIPANT_ADMIN_API_PORT_SUFFIX:}2${PARTICIPANT_ADMIN_API_PORT_SUFFIX}"
       - "${TEST_PORT-2$PARTICIPANT_JSON_API_PORT_SUFFIX:}2${PARTICIPANT_JSON_API_PORT_SUFFIX}"
+      - "${TEST_PORT-1$PARTICIPANT_LEDGER_API_PORT_SUFFIX:}1${PARTICIPANT_LEDGER_API_PORT_SUFFIX}"
+      - "${TEST_PORT-1$PARTICIPANT_ADMIN_API_PORT_SUFFIX:}1${PARTICIPANT_ADMIN_API_PORT_SUFFIX}"
+      - "${TEST_PORT-1$PARTICIPANT_JSON_API_PORT_SUFFIX:}1${PARTICIPANT_JSON_API_PORT_SUFFIX}"
     healthcheck:
       test: ["CMD", "bash", "/app/health-check.sh"]
       interval: 20s
@@ -130,6 +146,7 @@ services:
       - app-provider
       - app-user
       - sv
+      - trading-partner
 
   splice:
     image: "${IMAGE_REPO}splice-app:${IMAGE_TAG}"
@@ -140,12 +157,14 @@ services:
       - *app-provider-auth-env
       - *app-user-auth-env
       - *sv-auth-env
+      - *trading-partner-auth-env
     volumes:
       - ${LOCALNET_DIR}/docker/splice/health-check.sh:/app/health-check.sh
       - ${LOCALNET_DIR}/conf/splice/app.conf:/app/app.conf
       - ${LOCALNET_DIR}/conf/splice/app-provider:/app/app-provider/${APP_PROVIDER_PROFILE}
       - ${LOCALNET_DIR}/conf/splice/app-user:/app/app-user/${APP_USER_PROFILE}
       - ${LOCALNET_DIR}/conf/splice/sv:/app/sv/${SV_PROFILE}
+      - ${LOCALNET_DIR}/conf/splice/trading-partner:/app/trading-partner/${TRADING_PARTNER_PROFILE}
       - domain-upgrade-dump:/domain-upgrade-dump
     healthcheck:
       test: ["CMD", "bash", "/app/health-check.sh"]
@@ -158,6 +177,7 @@ services:
       - "${TEST_PORT-4$VALIDATOR_ADMIN_API_PORT_SUFFIX:}4${VALIDATOR_ADMIN_API_PORT_SUFFIX}"
       - "${TEST_PORT-3$VALIDATOR_ADMIN_API_PORT_SUFFIX:}3${VALIDATOR_ADMIN_API_PORT_SUFFIX}"
       - "${TEST_PORT-2$VALIDATOR_ADMIN_API_PORT_SUFFIX:}2${VALIDATOR_ADMIN_API_PORT_SUFFIX}"
+      - "${TEST_PORT-1$VALIDATOR_ADMIN_API_PORT_SUFFIX:}1${VALIDATOR_ADMIN_API_PORT_SUFFIX}"
     depends_on:
       canton:
         condition: service_healthy
@@ -166,6 +186,7 @@ services:
       - app-provider
       - app-user
       - sv
+      - trading-partner
 
   console:
     build:
@@ -177,11 +198,13 @@ services:
       - *app-provider-auth-env
       - *app-user-auth-env
       - *sv-auth-env
+      - *trading-partner-auth-env
     volumes:
       - ${LOCALNET_DIR}/conf/console/app.conf:/app/app.conf
       - ${LOCALNET_DIR}/conf/console/app-provider:/app/app-provider/${APP_PROVIDER_PROFILE}
       - ${LOCALNET_DIR}/conf/console/app-user:/app/app-user/${APP_USER_PROFILE}
       - ${LOCALNET_DIR}/conf/console/sv:/app/sv/${SV_PROFILE}
+      - ${LOCALNET_DIR}/conf/console/trading-partner:/app/trading-partner/${TRADING_PARTNER_PROFILE}
       - ${LOCALNET_DIR}/docker/console/entrypoint.sh:/app/entrypoint.sh
     entrypoint: /app/entrypoint.sh
     stdin_open: true
@@ -195,7 +218,8 @@ services:
     environment:
       URLS: '[{"url": "http://canton.localhost:${APP_PROVIDER_UI_PORT}/docs/openapi", "name": "app-provider"},
               {"url": "http://canton.localhost:${APP_USER_UI_PORT}/docs/openapi", "name": "app-user"},
-              {"url": "http://canton.localhost:${SV_UI_PORT}/docs/openapi", "name": "sv"}]'
+              {"url": "http://canton.localhost:${SV_UI_PORT}/docs/openapi", "name": "sv"},
+              {"url": "http://canton.localhost:${TRADING_PARTNER_UI_PORT}/docs/openapi", "name": "trading-partner"}]'
     ports:
       - "${SWAGGER_UI_PORT}:8080"
     profiles:
@@ -276,3 +300,26 @@ services:
       - *sv-auth-env
     profiles:
       - sv
+
+  ###############################################################################################################
+  ### Trading Partner
+  ###############################################################################################################
+  wallet-web-ui-trading-partner:
+    image: "${IMAGE_REPO}wallet-web-ui:${IMAGE_TAG}"
+    container_name: wallet-web-ui-trading-partner
+    env_file:
+      - ${LOCALNET_ENV_DIR}/common.env
+      - *trading-partner-auth-env
+    profiles:
+      - trading-partner
+
+  ans-web-ui-trading-partner:
+    image: "${IMAGE_REPO}ans-web-ui:${IMAGE_TAG}"
+    container_name: ans-web-ui-trading-partner
+    env_file:
+      - ${LOCALNET_ENV_DIR}/common.env
+      - *trading-partner-auth-env
+    environment:
+      - SPLICE_APP_WALLET_REDIRECT=http://wallet.localhost:${TRADING_PARTNER_UI_PORT}
+    profiles:
+      - trading-partner

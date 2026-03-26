@@ -157,37 +157,79 @@ Docker profiles control which services start: `app-provider`, `app-user`, `sv`, 
 
 ### Exchange Setup Scripts (`docker/setup-exchange/`)
 
-Sequential scripts for setting up the Canton Exchange Backend on localnet:
+Sequential scripts for setting up the Canton Exchange Backend (`canton-exchange-backend`) on localnet. All scripts are idempotent (safe to re-run). Configured via `docker/setup-exchange/.env` (copy from `.env.example`).
 
-1. `01-setup-exchange.sh` - Upload DARs, create on-ledger contracts, generate backend `.env`, start DB
-2. `02-register-featured-app-right.sh` - Register FeaturedAppRight contract
-3. `03-register-cbtc-token.sh` - Onboard CBTC external party, create InstrumentConfiguration + AllocationFactory
-4. `04-register-amulet-token.sh` - Register Amulet (CC) token issuer (DSO-managed, dynamic factory)
+**Run order**: `01` → start backend → `02` → `03` → `04`
 
-See `docker/setup-exchange/README.md` for detailed usage.
+1. `01-setup-exchange.sh` - Upload DARs to both participants, create FeaturedAppRight (via disclosed contract from SV) + BatchedMarkersProxy on-ledger, generate backend `.env.local`, start exchange DB (port 5433) + run migrations
+2. `02-register-featured-app-right.sh` - Query FeaturedAppRight contract from ledger, register it in exchange backend DB (`POST /feature-app-right`)
+3. `03-register-cbtc-token.sh` - Generate Ed25519 keypair → onboard CBTC external party → create InstrumentConfiguration + AllocationFactory (utility packages, via interactive submission) → register allocation factory + token issuer in backend. Outputs: `cbtc-network-keypair.json`, `cbtc-factories.json`
+4. `04-register-amulet-token.sh` - Register Amulet (CC) token issuer in backend (DSO-managed, factory fetched dynamically from scan-proxy at runtime — no on-ledger contracts needed)
+
+**Key patterns used**:
+- **Disclosed contracts**: FeaturedAppRight creation fetches AmuletRules from SV participant (`:4975`) with `createdEventBlob`, passes it when exercising from app-user participant
+- **Interactive submission**: External party contracts (script 03) use prepare → sign → execute flow since external parties can't use `submit-and-wait`
+- **Auth auto-detection**: Scripts read `AUTH_MODE` from `quickstart/.env.local`; SV always uses shared-secret regardless of mode
+
+**Prerequisites**: Quickstart running (all containers healthy), DAR files in `quickstart/daml/dars/`, `canton-exchange-backend` repo cloned, `@canton-network/core-signing-lib` installed (for script 03).
+
+See `docker/setup-exchange/README.md` for detailed usage, config reference, and troubleshooting.
 
 ### UTXO Handling Scripts (`docker/utxo-handling/`)
 
-Sequential scripts for managing external party wallets and UTXO merging:
+Scripts for generating external party wallets, minting/fauceting tokens, and merging UTXO-like holdings. Simulates token distribution for testing exchange operations. Configured via `../setup-exchange/.env` (shared config).
 
-1. `01-generate-user-wallet.sh` - Generate 25 Ed25519 keypairs + onboard external parties
-2. `02-request-minting-cbtc.sh` - Mint CBTC via AllocationFactory
-3. `03-request-faucet-amulet.sh` - Tap Amulet via AmuletRules_DevNet_Tap
-4. `04-create-merge-delegation.sh` - Create MergeDelegationProposal + Accept
-5. `05-user-wallet-utxo-merging-cbtc.sh` - Merge CBTC holdings (queries live contracts)
-6. `06-user-wallet-utxo-merging-amulet.sh` - Merge Amulet holdings (queries live contracts)
-7. `07-query-holdings-cbtc.sh` → `user-wallet-holdings-cbtc.json`
-8. `08-query-holdings-amulet.sh` → `user-wallet-holdings-amulet.json`
-9. `09-merge-holdings-cbtc.sh` - Batch merge CBTC from JSON (uses `cbtc-factories.json`)
-10. `10-merge-holdings-amulet.sh` - Batch merge Amulet from JSON (fetches live SV contracts)
+**Run order**: `01` → `02`/`03` (parallel) → `04` → `05`/`06` or `07`→`09` / `08`→`10`
 
-These scripts use interactive submission (external party signing) via the Canton JSON API v2.
+**Phase 1 — Wallet Setup**:
+1. `01-generate-user-wallet.sh` - Generate Ed25519 keypairs (default 25, configurable via `NUM_WALLETS`) with random multicultural names → onboard external parties on app-user participant → create Canton users. All wallets share one party hint (default `kairo`, configurable via `PARTY_HINT`). Outputs: `user-wallet-keypairs.json`
+
+**Phase 2 — Token Distribution** (NOT idempotent — re-running creates additional holdings):
+2. `02-request-minting-cbtc.sh` - For each wallet, mint CBTC holdings via 2-step `AllocationFactory_RequestMint` (wallet signs) → `MintRequest_Accept` (CBTC-NETWORK signs), both via interactive submission. Default 20 mints/wallet, random 100-1000 CBTC each. Outputs: `user-wallet-holdings-cbtc.json`
+3. `03-request-faucet-amulet.sh` - For each wallet, tap Amulet via `AmuletRules_DevNet_Tap` (DevNet only) with AmuletRules + OpenMiningRound as disclosed contracts from SV. Default 20 taps/wallet, random 100-1000 CC each. Outputs: `user-wallet-holdings-amulet.json`
+
+**Phase 3 — Merge Delegation**:
+4. `04-create-merge-delegation.sh` - For each wallet: owner creates `MergeDelegationProposal` (interactive submission) → executor accepts (regular submission). Enables the exchange backend's executor party to merge holdings without wallet private keys. Outputs: `user-wallet-merge-delegation.json`
+
+**Phase 4 — UTXO Merging** (two alternative workflows):
+
+*Option A — Live query + merge (scripts 05/06)*:
+5. `05-user-wallet-utxo-merging-cbtc.sh` - Query live CBTC holdings → exercise `MergeDelegation_Merge` via regular submission (operator `actAs`, wallet `readAs`). Uses AllocationFactory as TransferFactory for self-transfers. Disclosed contracts: AllocationFactory + InstrumentConfiguration + FeaturedAppRight. Verifies balances. Outputs: `user-wallet-merged-holdings-cbtc.json`
+6. `06-user-wallet-utxo-merging-amulet.sh` - Query live Amulet holdings → fetch ExternalPartyAmuletRules + AmuletRules + OpenMiningRound from SV → exercise `MergeDelegation_Merge`. Disclosed contracts: 3 SV contracts + FeaturedAppRight (4 total). Verifies balances. Outputs: `user-wallet-merged-holdings-amulet.json`
+
+*Option B — Separate query then merge (scripts 07-10)*:
+7. `07-query-holdings-cbtc.sh` - Query CBTC Holding contracts from ledger → `user-wallet-holdings-cbtc.json`
+8. `08-query-holdings-amulet.sh` - Query Amulet contracts from ledger → `user-wallet-holdings-amulet.json`
+9. `09-merge-holdings-cbtc.sh` - Read 07's JSON output → merge via `MergeDelegation_Merge` (same logic as 05). Uses `cbtc-factories.json`
+10. `10-merge-holdings-amulet.sh` - Read 08's JSON output → merge via `MergeDelegation_Merge` (same logic as 06). Fetches live SV contracts
+
+**Key patterns used**:
+- **Interactive submission**: External party operations (minting, fauceting, delegation proposals) use prepare → sign → execute flow
+- **Regular submission**: Merge operations use `MergeDelegation_Merge` with `actAs: [operator]`, `readAs: [owner]` — no wallet private keys needed
+- **Self-transfer merging**: Both AllocationFactory (CBTC) and ExternalPartyAmuletRules (Amulet) return `Completed` for self-transfers (sender==receiver), enabling atomic single-transaction merges
+- **Disclosed contracts**: CBTC merges need AllocationFactory + InstrumentConfiguration + FeaturedAppRight; Amulet merges need ExternalPartyAmuletRules + AmuletRules + OpenMiningRound + FeaturedAppRight
+
+**Prerequisites**: Quickstart running, exchange setup scripts 01-03 completed, exchange backend running, `@canton-network/core-signing-lib` installed.
+
+See `docker/utxo-handling/README.md` for detailed usage, Daml workflow diagrams, and troubleshooting.
 
 ### Frontend URLs (after `make start`)
 
 - App frontend: `http://app-provider.localhost:3000`
 - App User wallet: `http://wallet.localhost:2000`
 - Vite dev server: `http://app-provider.localhost:5173`
+
+## Detailed Documentation
+
+The `docs/` directory contains in-depth architectural documents (generated from codebase analysis):
+
+- `01-ARCHITECTURE-OVERVIEW.md` - High-level architecture, service topology, data flow diagrams
+- `02-DAML-CONTRACTS.md` - Daml template details, workflow state machine, token standard integration
+- `03-BACKEND-SERVICE.md` - Spring Boot package structure, REST API reference, gRPC integration, PQS queries
+- `04-FRONTEND-APP.md` - React component hierarchy, state management, API client layer
+- `05-DOCKER-INFRASTRUCTURE.md` - Docker Compose module system, service configuration, networking
+- `06-BUILD-SYSTEM.md` - Gradle multi-project build, code generation pipeline, Makefile targets
+- `07-EXCHANGE-AND-UTXO-SCRIPTS.md` - Exchange setup and UTXO handling script details
 
 ## Key Configuration Files
 

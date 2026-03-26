@@ -95,6 +95,7 @@ Generates user wallet external parties with random multicultural names (European
 ### Usage
 
 ```bash
+# Generate 25 wallets (default — overwrites existing keypairs file)
 ./01-generate-user-wallet.sh
 
 # With custom number of wallets
@@ -102,6 +103,12 @@ NUM_WALLETS=5 ./01-generate-user-wallet.sh
 
 # With custom party hint
 PARTY_HINT=myapp ./01-generate-user-wallet.sh
+
+# Append 10 more wallets to the existing keypairs file
+APPEND_WALLETS=true NUM_WALLETS=10 ./01-generate-user-wallet.sh
+
+# Onboard-only: skip keypair generation, onboard from existing keypairs file
+ONBOARD_ONLY=true ./01-generate-user-wallet.sh
 ```
 
 ### Configuration
@@ -112,20 +119,52 @@ Configurable via environment variables:
 |----------|---------|-------------|
 | `NUM_WALLETS` | `25` | Number of user wallets to generate |
 | `PARTY_HINT` | `kairo` | Party hint used for all external parties on the ledger |
+| `APPEND_WALLETS` | `false` | Set to `true` to append new wallets to the existing keypairs file instead of overwriting it |
+| `ONBOARD_ONLY` | `false` | Set to `true` to skip keypair generation and only onboard/create users from the existing keypairs file. `NUM_WALLETS` and `APPEND_WALLETS` are ignored |
+
+### Onboard-Only Mode (`ONBOARD_ONLY=true`)
+
+When `ONBOARD_ONLY=true`, the script:
+
+- **Skips** keypair generation entirely (Step 1) and downstream JSON cleanup
+- **Reads** the existing `user-wallet-keypairs.json` file and validates its structure
+- **Runs** only Steps 2 (onboard external parties) and 3 (create Canton users) for all wallets in the file
+- **Ignores** `NUM_WALLETS` and `APPEND_WALLETS` — the wallet count is determined by the keypairs file
+
+This is useful when:
+- You have a pre-generated keypairs file (e.g., exported from another environment or manually edited)
+- The quickstart was restarted and you need to re-onboard existing wallets without regenerating keys
+- You want to onboard wallets that were generated but whose onboarding was interrupted
+
+The keypairs file must exist and contain valid data: `{ partyHint, wallets: [{ publicKey, privateKey, fingerprint, userId, ... }] }`.
+
+### Append Mode (`APPEND_WALLETS=true`)
+
+When `APPEND_WALLETS=true`, the script:
+
+- **Preserves** the existing `user-wallet-keypairs.json` and all downstream JSON files (holdings, merge-delegation, etc.)
+- **Generates** `NUM_WALLETS` new keypairs with indices continuing from the last existing wallet (e.g., if 25 wallets exist, new ones start at index 25)
+- **Deduplicates** display names against existing wallets to avoid collisions
+- **Merges** the new wallets into the existing keypairs file
+- **Onboards and creates users** for all wallets (existing ones are skipped via idempotent checks)
+
+This is useful when you need to add more test wallets without losing existing wallets, their holdings, or their merge delegations.
 
 ### What It Does
 
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | Pre-flight | Sources `../setup-exchange/.env`, loads CBTC config and keypair, generates Canton JWT, gets synchronizer ID |
-| -- | Cleanup | Removes downstream JSON files from previous runs (`user-wallet-holdings-*.json`, `user-wallet-merge-delegation.json`, `user-wallet-merged-holdings-*.json`) |
-| 1 | Generate keypairs | Creates Ed25519 keypairs with random multicultural names (European, Chinese, Vietnamese) in a single Node.js invocation using `@canton-network/core-signing-lib`. All wallets share the same `partyHint` (from `PARTY_HINT` env var); each gets a unique `displayName` and `email`. Saves to `user-wallet-keypairs.json` |
-| 2 | Onboard external parties | For each wallet: `generate-topology` -> sign multiHash -> `allocate`. Updates keypairs file with resolved party IDs |
-| 3 | Create Canton users | Creates Canton users with `CanActAs`/`CanReadAs` rights. Also grants admin user rights over each wallet party |
+| -- | Cleanup | Removes downstream JSON files from previous runs (skipped in append and onboard-only modes) |
+| 1 | Generate keypairs | Creates Ed25519 keypairs with random multicultural names (European, Chinese, Vietnamese) in a single Node.js invocation using `@canton-network/core-signing-lib`. All wallets share the same `partyHint` (from `PARTY_HINT` env var); each gets a unique `displayName` and `email`. In append mode, new wallets are merged into the existing file with continued indices. Skipped entirely in onboard-only mode |
+| 2 | Onboard external parties | For each wallet: `generate-topology` -> sign multiHash -> `allocate`. Updates keypairs file with resolved party IDs. Already-onboarded parties are skipped |
+| 3 | Create Canton users | Creates Canton users with `CanActAs`/`CanReadAs` rights. Also grants admin user rights over each wallet party. Existing users are skipped |
 
 ### Idempotency
 
-- Keypairs are regenerated with fresh random names on every run (existing file is deleted automatically).
+- In default mode, keypairs are regenerated with fresh random names on every run (existing file is deleted automatically).
+- In append mode, existing wallets are preserved; only new wallets are generated and appended.
+- In onboard-only mode, the keypairs file is read as-is; no generation or modification of keys occurs.
 - External party allocation checks if each party exists before allocating.
 - Canton user creation checks via `GET /v2/users/{userId}` before creating.
 

@@ -20,7 +20,13 @@
       "Bash(./06-user-wallet-utxo-merging-amulet.sh:*)",
       "Bash(./08-query-holdings-amulet.sh:*)",
       "Bash(./09-merge-holdings-cbtc.sh:*)",
-      "Bash(./10-merge-holdings-amulet.sh:*)"
+      "Bash(./10-merge-holdings-amulet.sh:*)",
+      "Bash(chmod +x /Users/lehoanganh/Working/FETCH/Angelhack/Canton/Quickstart/quickstart/docker/setup-trading-partner/01-setup-trading-partner.sh)",
+      "Bash(chmod +x /Users/lehoanganh/Working/FETCH/Angelhack/Canton/Quickstart/quickstart/docker/modules/splice-onboarding/docker/trading-partner.sh)",
+      "Bash(docker restart:*)",
+      "Bash(curl -s http://localhost:1975/v2/version)",
+      "Bash(grep -r allocation-factory /Users/lehoanganh/Working/FETCH/Angelhack/Canton/canton-exchange-backend/src --include=*.ts)",
+      "Bash(jq:*)"
     ]
   }
 }

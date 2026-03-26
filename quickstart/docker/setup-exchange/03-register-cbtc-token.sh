@@ -9,8 +9,7 @@
 #      — this single contract implements AllocationFactory, TransferFactory, AND BurnMintFactory interfaces
 #   6. Acquires disclosures (createdEventBlob) for both AllocationFactory and InstrumentConfiguration
 #   7. Writes cbtc-factories.json with factory + instrument config contract IDs and disclosures
-#   8. Registers the AllocationFactory in the backend (POST /allocation-factory)
-#   9. Registers the token issuer in the backend (POST /token-issuer)
+#   8. Registers the token issuer in the backend (POST /token-issuer) with factory + disclosed contracts
 #
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
@@ -872,80 +871,13 @@ log "  AllocationFactory CID: ${ALLOCATION_FACTORY_CID:0:40}..."
 log "  InstrumentConfiguration CID: ${INSTRUMENT_CONFIG_CID:0:40}..."
 
 ##############################################################################
-# Step 8: Register AllocationFactory in backend (POST /allocation-factory)
+# Step 8: Register token issuer in backend (POST /token-issuer)
+# Note: allocation_factories table was dropped — factory data (factoryContractId,
+# discloseContracts, choiceContextData) is now stored directly in token_issuers.
 ##############################################################################
 
 log ""
-log "Step 8: Registering AllocationFactory in backend..."
-
-# Check if already registered
-EXISTING_FACTORY=$(curl -sf "$BACKEND_URL/allocation-factory/type/cbtc" \
-  -H "Authorization: Bearer $BACKEND_TOKEN" 2>/dev/null || echo "")
-
-if [ -n "$EXISTING_FACTORY" ] && echo "$EXISTING_FACTORY" | jq -e '.data.factoryId // .factoryId' > /dev/null 2>&1; then
-  EXISTING_FACTORY_ID=$(echo "$EXISTING_FACTORY" | jq -r '.data.factoryId // .factoryId')
-  log "  AllocationFactory already registered in backend: $EXISTING_FACTORY_ID"
-else
-  # Build discloseContracts array with both AllocationFactory and InstrumentConfiguration
-  DISCLOSE_CONTRACTS=$(jq -n \
-    --argjson alloc "$ALLOC_DISCLOSED_CONTRACT" \
-    --argjson ic "$INSTRUMENT_DISCLOSED_CONTRACT" \
-    '[$alloc, $ic]')
-
-  # Build choiceContextData with instrument-configuration and empty credentials
-  CHOICE_CONTEXT_DATA=$(jq -n \
-    --arg icCid "$INSTRUMENT_CONFIG_CID" \
-    '{
-      values: {
-        "sender-credentials": { tag: "AV_List", value: [] },
-        "instrument-configuration": { tag: "AV_ContractId", value: $icCid },
-        "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
-        "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] },
-        "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid }
-      }
-    }')
-
-  FACTORY_REG_BODY=$(jq -n \
-    --arg factoryId "$ALLOCATION_FACTORY_CID" \
-    --argjson discloseContracts "$DISCLOSE_CONTRACTS" \
-    --argjson choiceContextData "$CHOICE_CONTEXT_DATA" \
-    '{
-      type: "cbtc",
-      factoryId: $factoryId,
-      discloseContracts: $discloseContracts,
-      choiceContextData: $choiceContextData
-    }')
-
-  FACTORY_REG_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/allocation-factory" \
-    -H "Authorization: Bearer $BACKEND_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$FACTORY_REG_BODY" 2>&1) || true
-
-  FACTORY_HTTP_CODE=$(echo "$FACTORY_REG_RESULT" | tail -n1 | tr -d '\r')
-  FACTORY_REG_BODY_RESP=$(echo "$FACTORY_REG_RESULT" | sed '$d')
-
-  case "$FACTORY_HTTP_CODE" in
-    200|201)
-      log "  AllocationFactory registered successfully!"
-      log "  Factory ID: $ALLOCATION_FACTORY_CID"
-      ;;
-    409)
-      log "  AllocationFactory already registered (type 'cbtc' exists)."
-      ;;
-    *)
-      log_error "AllocationFactory registration failed with HTTP $FACTORY_HTTP_CODE"
-      log_error "Response: $FACTORY_REG_BODY_RESP"
-      exit 1
-      ;;
-  esac
-fi
-
-##############################################################################
-# Step 9: Register token issuer in backend (POST /token-issuer)
-##############################################################################
-
-log ""
-log "Step 9: Registering CBTC token issuer in backend..."
+log "Step 8: Registering CBTC token issuer in backend..."
 
 # Check if already registered
 EXISTING_ISSUER=$(curl -sf "$BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID" \
@@ -1043,6 +975,5 @@ log "  InstrumentConfiguration CID: $INSTRUMENT_CONFIG_CID"
 log "  Token issuer: $CBTC_TOKEN_ID ($CBTC_DISPLAY_NAME)"
 log ""
 log "Verify:"
-log "  curl -s $BACKEND_URL/allocation-factory/type/cbtc -H 'Authorization: Bearer <token>' | jq"
 log "  curl -s $BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID -H 'Authorization: Bearer <token>' | jq"
 log "  jq '.' $FACTORIES_FILE"
