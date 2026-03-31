@@ -47,11 +47,12 @@ fi
 PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
 NUM_PARTIES="${NUM_PARTIES:-10}"
 PARTY_HINT_PREFIX="${PARTY_HINT_PREFIX:-trader}"
-SHARED_SECRET="${SHARED_SECRET:-unsafe}"
-SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
-SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
 APPEND_PARTIES="${APPEND_PARTIES:-false}"
 ONBOARD_ONLY="${ONBOARD_ONLY:-false}"
+AUTH_MODE="${AUTH_MODE:-shared-secret}"
+
+# Source shared auth helpers
+source "$SCRIPT_DIR/auth.sh"
 
 # Output file
 PARTIES_FILE="$SCRIPT_DIR/internal-parties.json"
@@ -109,27 +110,6 @@ curl_status_code() {
     -H "Content-Type: $content_type"
 }
 
-generate_jwt() {
-  local sub="$1"
-  local aud="$2"
-  local now
-  now=$(date +%s)
-  local exp=$((now + 86400))
-
-  b64url() {
-    openssl enc -base64 -A | tr '+/' '-_' | tr -d '='
-  }
-
-  local header
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload
-  payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' "$sub" "$aud" "$now" "$exp" | b64url)
-  local signature
-  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | b64url)
-
-  echo "${header}.${payload}.${signature}"
-}
-
 ##############################################################################
 # Pre-flight checks
 ##############################################################################
@@ -145,9 +125,12 @@ else
   log "  Append mode: $APPEND_PARTIES"
 fi
 log "  Participant: $PARTICIPANT_JSON_API"
+log "  Auth mode: $AUTH_MODE"
 log ""
 
-TOKEN=$(generate_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
+ADMIN_USER="${ADMIN_USER:-${SHARED_SECRET_USER:-ledger-api-user}}"
+
+TOKEN=$(get_participant_token)
 
 # Verify participant is reachable
 VERSION=$(curl_check "$PARTICIPANT_JSON_API/v2/version" "" "application/json" 2>/dev/null | jq -r '.version // empty') || VERSION=""
@@ -303,9 +286,9 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
   PARTY_ID=$(jq -r ".parties[$i].partyId" "$PARTIES_FILE")
 
   # Grant admin user ActAs/ReadAs over this party
-  curl_check "$PARTICIPANT_JSON_API/v2/users/$SHARED_SECRET_USER/rights" "$TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER/rights" "$TOKEN" "application/json" \
     --data-raw "$(jq -n \
-      --arg userId "$SHARED_SECRET_USER" \
+      --arg userId "$ADMIN_USER" \
       --arg party "$PARTY_ID" \
       '{
         userId: $userId,

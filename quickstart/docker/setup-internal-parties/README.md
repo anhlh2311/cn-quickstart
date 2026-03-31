@@ -15,15 +15,49 @@ Scripts for allocating **internal parties** on a Canton participant node and set
 
 ## Prerequisites
 
-- Quickstart running: `cd quickstart && make start`
+- Canton participant node running (quickstart localnet or devnet)
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# Edit .env if needed (defaults allocate 10 parties on app-user participant)
+# Edit .env — set PARTICIPANT_JSON_API, AUTH_MODE, and auth credentials
 ./01-allocate-internal-parties.sh
 ```
+
+## Authentication
+
+All scripts support both **shared-secret** and **OAuth2** authentication, configured via `AUTH_MODE` in `.env`. Auth logic is shared via `auth.sh`.
+
+### Shared-secret (default, for localnet)
+
+```bash
+AUTH_MODE="shared-secret"
+SHARED_SECRET="unsafe"
+SHARED_SECRET_AUDIENCE="https://canton.network.global"
+SHARED_SECRET_USER="ledger-api-user"
+ADMIN_USER="ledger-api-user"
+```
+
+### OAuth2 (for devnet / production)
+
+```bash
+AUTH_MODE="oauth2"
+OAUTH2_TOKEN_URL="<your-token-url>"
+OAUTH2_CLIENT_ID="<your-client-id>"
+OAUTH2_CLIENT_SECRET="<your-client-secret>"
+OAUTH2_AUDIENCE=""                  # audience for the Canton JSON API
+OAUTH2_VALIDATOR_AUDIENCE=""        # audience for the Validator Admin API (defaults to OAUTH2_AUDIENCE)
+ADMIN_USER="<keycloak-user-uuid>"   # user ID for resolving participant's primary party
+```
+
+**`ADMIN_USER`**: Used to resolve the participant's primary party via `GET /v2/users/<ADMIN_USER>`. In shared-secret mode, this is `ledger-api-user`. In OAuth2 mode, this is the Keycloak/Auth0 user identifier (e.g., `client-id@clients`).
+
+**Separate audiences**: On devnet, the JSON API and Validator Admin API may require different audiences. Set `OAUTH2_VALIDATOR_AUDIENCE` if your validator uses a different audience from the JSON API. If not set, it defaults to `OAUTH2_AUDIENCE`.
+
+In OAuth2 mode, per-user tokens (used by script 02 for creating proposals) use the same participant token since OAuth2 client_credentials flow doesn't support per-user scoping.
+
+**Security**: The `.env` file contains credentials and is gitignored. Only `.env.example` (with placeholder values) is committed. Output JSON files (`internal-parties.json`, `transfer-preapprovals.json`, `distributed-amulet.json`, `transfers.json`) are also gitignored as they contain environment-specific data.
 
 ## Usage
 
@@ -42,18 +76,22 @@ APPEND_PARTIES=true NUM_PARTIES=5 ./01-allocate-internal-parties.sh
 
 # Re-onboard from existing file (skip allocation, just create Canton users)
 ONBOARD_ONLY=true ./01-allocate-internal-parties.sh
+
+# Use OAuth2 auth (override .env)
+AUTH_MODE=oauth2 ./01-allocate-internal-parties.sh
 ```
 
-## Configuration
+## Script 1: `01-allocate-internal-parties.sh`
+
+### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PARTICIPANT_JSON_API` | `http://localhost:2975` | Canton JSON API URL of the target participant |
 | `NUM_PARTIES` | `10` | Number of internal parties to allocate |
 | `PARTY_HINT_PREFIX` | `trader` | Prefix for party hints (`<prefix>-0`, `<prefix>-1`, ...) |
-| `SHARED_SECRET` | `unsafe` | Shared secret for JWT generation |
-| `SHARED_SECRET_AUDIENCE` | `https://canton.network.global` | JWT audience |
-| `SHARED_SECRET_USER` | `ledger-api-user` | Canton admin user |
+| `ADMIN_USER` | `ledger-api-user` | Canton admin user ID for resolving primary party and granting rights |
+| `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `APPEND_PARTIES` | `false` | Append to existing output file instead of overwriting |
 | `ONBOARD_ONLY` | `false` | Skip allocation, only create Canton users from existing file |
 
@@ -130,6 +168,8 @@ POLL_TIMEOUT=120 ./02-create-transfer-preapprovals.sh
 |----------|---------|-------------|
 | `PARTICIPANT_JSON_API` | `http://localhost:2975` | Canton JSON API URL |
 | `VALIDATOR_API` | `http://localhost:2903` | Validator Admin API URL (for DSO party + polling) |
+| `ADMIN_USER` | `ledger-api-user` | Canton admin user ID for resolving provider party |
+| `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `POLL_TIMEOUT` | `60` | Max seconds to wait for validator to accept each proposal |
 
 ### Contract Details
@@ -210,8 +250,9 @@ TRANSFERS_FILE=my-transfers.json ./03-distribute-amulet.sh
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PARTICIPANT_JSON_API` | `http://localhost:2975` | Canton JSON API URL |
-| `VALIDATOR_API` | `http://localhost:2903` | Validator Admin API (for DSO party resolution) |
-| `SV_JSON_API` | `http://localhost:4975` | SV JSON API (for AmuletRules + OpenMiningRound) |
+| `VALIDATOR_API` | `http://localhost:2903` | Validator Admin API (for DSO party, AmuletRules, OpenMiningRound) |
+| `ADMIN_USER` | `ledger-api-user` | Canton admin user ID for resolving sender party |
+| `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `TRANSFERS_FILE` | `./transfers.json` | Path to input JSON file |
 | `PREAPPROVALS_FILE` | `./transfer-preapprovals.json` | Path to preapprovals from script 02 |
 
@@ -220,7 +261,7 @@ TRANSFERS_FILE=my-transfers.json ./03-distribute-amulet.sh
 | Step | Action | Details |
 |------|--------|---------|
 | 0 | Pre-flight | Resolves sender party, DSO party, synchronizer ID. Validates all recipients have TransferPreapprovals |
-| 1 | Fetch SV contracts | Fetches `AmuletRules` + `OpenMiningRound` from SV with `createdEventBlob` for disclosed contracts |
+| 1 | Fetch scan-proxy contracts | Fetches `AmuletRules` + `OpenMiningRound` from validator's scan-proxy API with `createdEventBlob` for disclosed contracts |
 | 2 | Query sender holdings | Queries sender's active Amulet contracts, sorted by amount descending |
 | 3 | Transfer | For each entry: exercises `TransferPreapproval_Send` on the recipient's TransferPreapproval contract with `actAs: [sender]`. Consumes sender's Amulet holding as input, tracks change Amulet for subsequent transfers |
 
@@ -232,15 +273,11 @@ Each transfer exercises the `TransferPreapproval_Send` choice:
 - **Controller**: `sender` (the participant's validator party)
 - **Arguments**: `sender`, `context` (AmuletRules + OpenMiningRound), `inputs` (sender's Amulet holding), `amount`, `description`
 - **Result**: Creates a new Amulet for the receiver and a change Amulet for the sender (minus transfer fees)
-- **Disclosed contracts**: AmuletRules + OpenMiningRound (from SV)
+- **Disclosed contracts**: AmuletRules + OpenMiningRound (from scan-proxy on validator API)
 
-### UTXO Tracking
+### UTXO Handling
 
-The script maintains a sorted list of the sender's available Amulet holdings. After each transfer:
-
-1. The consumed input holding is removed from the list
-2. The change Amulet (if any) is added back to the list
-3. The next transfer picks the smallest holding that covers the requested amount
+Before each transfer, the script re-queries the sender's active Amulet holdings from the ledger to get the latest state. This ensures consumed holdings are excluded and change Amulets from previous transfers are available. The script picks the first holding with sufficient balance for each transfer.
 
 ### Output
 

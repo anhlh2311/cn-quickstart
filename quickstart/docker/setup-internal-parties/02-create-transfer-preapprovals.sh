@@ -35,11 +35,12 @@ fi
 
 PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
 VALIDATOR_API="${VALIDATOR_API:-http://localhost:2903}"
-SHARED_SECRET="${SHARED_SECRET:-unsafe}"
-SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
-SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+AUTH_MODE="${AUTH_MODE:-shared-secret}"
 # Max seconds to wait for validator to accept each proposal
 POLL_TIMEOUT="${POLL_TIMEOUT:-60}"
+
+# Source shared auth helpers
+source "$SCRIPT_DIR/auth.sh"
 
 PARTIES_FILE="$SCRIPT_DIR/internal-parties.json"
 OUTPUT_FILE="$SCRIPT_DIR/transfer-preapprovals.json"
@@ -87,27 +88,6 @@ curl_check() {
   echo "$response_body"
 }
 
-generate_jwt() {
-  local sub="$1"
-  local aud="$2"
-  local now
-  now=$(date +%s)
-  local exp=$((now + 86400))
-
-  b64url() {
-    openssl enc -base64 -A | tr '+/' '-_' | tr -d '='
-  }
-
-  local header
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload
-  payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' "$sub" "$aud" "$now" "$exp" | b64url)
-  local signature
-  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | b64url)
-
-  echo "${header}.${payload}.${signature}"
-}
-
 ##############################################################################
 # Pre-flight checks
 ##############################################################################
@@ -126,23 +106,26 @@ TOTAL_PARTIES=$(jq '.parties | length' "$PARTIES_FILE")
 log "  Parties: $TOTAL_PARTIES"
 log "  Participant: $PARTICIPANT_JSON_API"
 log "  Validator: $VALIDATOR_API"
+log "  Auth mode: $AUTH_MODE"
 log "  Poll timeout: ${POLL_TIMEOUT}s per party"
 log ""
 
-TOKEN=$(generate_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
+TOKEN=$(get_participant_token)
+VALIDATOR_TOKEN=$(get_validator_token)
 
 # Resolve the validator (provider) party — the primary party of the admin user
-PROVIDER_PARTY=$(curl_check "$PARTICIPANT_JSON_API/v2/users/$SHARED_SECRET_USER" "$TOKEN" "application/json" \
+ADMIN_USER="${ADMIN_USER:-${SHARED_SECRET_USER:-ledger-api-user}}"
+PROVIDER_PARTY=$(curl_check "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER" "$TOKEN" "application/json" \
   | jq -r '.user.primaryParty // empty')
 
 if [ -z "$PROVIDER_PARTY" ]; then
-  log_error "Could not resolve provider (validator) party from user $SHARED_SECRET_USER"
+  log_error "Could not resolve provider (validator) party from user $ADMIN_USER"
   exit 1
 fi
 log "  Provider (validator) party: ${PROVIDER_PARTY:0:50}..."
 
 # Resolve DSO party from validator API
-DSO_PARTY=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$TOKEN" "application/json" \
+DSO_PARTY=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$VALIDATOR_TOKEN" "application/json" \
   | jq -r '.dso_party_id // empty')
 
 if [ -z "$DSO_PARTY" ]; then
@@ -191,7 +174,7 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
 
   # Check if preapproval already exists via validator API
   EXISTING=$(curl -s -w "\n%{http_code}" \
-    -H "Authorization: Bearer $TOKEN" \
+    -H "Authorization: Bearer $VALIDATOR_TOKEN" \
     "$VALIDATOR_API/api/validator/v0/admin/transfer-preapprovals/by-party/$PARTY_ID" 2>/dev/null || echo "")
   EXISTING_HTTP=$(echo "$EXISTING" | tail -n1 | tr -d '\r')
   EXISTING_BODY=$(echo "$EXISTING" | sed '$d')
@@ -200,8 +183,8 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
     PREAPPROVAL_CID=$(echo "$EXISTING_BODY" | jq -r '.transfer_preapproval.contract_id // .transfer_preapproval.contract.contract_id')
     log "  [$((i+1))/$TOTAL_PARTIES] $PARTY_HINT: preapproval already exists: ${PREAPPROVAL_CID:0:40}..."
   else
-    # Generate a user-specific JWT to submit as the receiver party
-    USER_TOKEN=$(generate_jwt "$USER_ID" "$SHARED_SECRET_AUDIENCE")
+    # Get a token to submit as the receiver party
+    USER_TOKEN=$(get_user_token "$USER_ID")
 
     # Create TransferPreapprovalProposal
     CMD_ID="transfer-preapproval-proposal-${PARTY_HINT}-$(date +%s)-$RANDOM"
