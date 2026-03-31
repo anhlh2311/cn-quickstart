@@ -236,9 +236,16 @@ log "Step 1: Fetching AmuletRules + OpenMiningRound from scan-proxy..."
 # Fetch AmuletRules via scan-proxy on the validator API
 AMULET_RULES_RESPONSE=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/amulet-rules" "$VALIDATOR_TOKEN" "application/json")
 
-AMULET_RULES_CID=$(echo "$AMULET_RULES_RESPONSE" | jq -r '.amulet_rules.contract_id // .amulet_rules.contractId // empty' 2>/dev/null || echo "")
-AMULET_RULES_TEMPLATE_HASH=$(echo "$AMULET_RULES_RESPONSE" | jq -r '.amulet_rules.template_id // .amulet_rules.templateId // empty' 2>/dev/null || echo "")
-AMULET_RULES_BLOB=$(echo "$AMULET_RULES_RESPONSE" | jq -r '.amulet_rules.created_event_blob // .amulet_rules.createdEventBlob // empty' 2>/dev/null || echo "")
+# Response format: { amulet_rules: { contract: { contract_id, template_id, created_event_blob, payload } } }
+AMULET_RULES_CID=$(echo "$AMULET_RULES_RESPONSE" | jq -r '
+  .amulet_rules.contract.contract_id // .amulet_rules.contract_id // .amulet_rules.contractId // empty
+' 2>/dev/null || echo "")
+AMULET_RULES_TEMPLATE_HASH=$(echo "$AMULET_RULES_RESPONSE" | jq -r '
+  .amulet_rules.contract.template_id // .amulet_rules.template_id // .amulet_rules.templateId // empty
+' 2>/dev/null || echo "")
+AMULET_RULES_BLOB=$(echo "$AMULET_RULES_RESPONSE" | jq -r '
+  .amulet_rules.contract.created_event_blob // .amulet_rules.created_event_blob // .amulet_rules.createdEventBlob // empty
+' 2>/dev/null || echo "")
 
 if [ -z "$AMULET_RULES_CID" ] || [ -z "$AMULET_RULES_BLOB" ]; then
   log_error "Could not fetch AmuletRules from scan-proxy"
@@ -250,20 +257,26 @@ log "  AmuletRules: ${AMULET_RULES_CID:0:40}..."
 # Fetch OpenMiningRound via scan-proxy on the validator API
 OPEN_ROUNDS_RESPONSE=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/open-and-issuing-mining-rounds" "$VALIDATOR_TOKEN" "application/json")
 
+# Response format: { open_mining_rounds: [{ contract: { contract_id, template_id, created_event_blob, payload } }] }
 # Pick the lowest (earliest/already-open) round
 OPEN_ROUND_CID=$(echo "$OPEN_ROUNDS_RESPONSE" | jq -r '
   [.open_mining_rounds[]
-   | { contract_id, round: (.payload.round // .round // 0) }]
+   | { contract_id: (.contract.contract_id // .contract_id),
+       round: (.contract.payload.round // .payload.round // .round // 0) }]
   | sort_by(.round) | first | .contract_id // empty
 ' 2>/dev/null || echo "")
 
 OPEN_ROUND_TEMPLATE_HASH=$(echo "$OPEN_ROUNDS_RESPONSE" | jq -r '
-  .open_mining_rounds[0].template_id // .open_mining_rounds[0].templateId // empty
+  [.open_mining_rounds[]
+   | { template_id: (.contract.template_id // .template_id),
+       round: (.contract.payload.round // .payload.round // .round // 0) }]
+  | sort_by(.round) | first | .template_id // empty
 ' 2>/dev/null || echo "")
 
 OPEN_ROUND_BLOB=$(echo "$OPEN_ROUNDS_RESPONSE" | jq -r '
   [.open_mining_rounds[]
-   | { created_event_blob, round: (.payload.round // .round // 0) }]
+   | { created_event_blob: (.contract.created_event_blob // .created_event_blob),
+       round: (.contract.payload.round // .payload.round // .round // 0) }]
   | sort_by(.round) | first | .created_event_blob // empty
 ' 2>/dev/null || echo "")
 
