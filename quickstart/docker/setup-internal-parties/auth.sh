@@ -55,18 +55,40 @@ _get_oauth2_token() {
   local client_secret="$3"
   local audience="${4:-}"
 
-  local args=(-s -f -S "$token_url"
+  local args=(-s -S -w "\n%{http_code}" "$token_url"
     -H 'Content-Type: application/x-www-form-urlencoded'
     -d "client_id=${client_id}"
     -d "client_secret=${client_secret}"
-    -d 'grant_type=client_credentials'
-    -d 'scope=openid')
+    -d 'grant_type=client_credentials')
 
   if [ -n "$audience" ]; then
     args+=(-d "audience=${audience}")
   fi
 
-  curl "${args[@]}" | jq -r '.access_token'
+  local response
+  response=$(curl "${args[@]}")
+
+  local http_code
+  http_code=$(echo "$response" | tail -n1 | tr -d '\r')
+  local response_body
+  response_body=$(echo "$response" | sed '$d')
+
+  if [ "$http_code" -ne "200" ] && [ "$http_code" -ne "201" ]; then
+    echo "[auth] ERROR: OAuth2 token request to $token_url failed with HTTP $http_code" >&2
+    echo "[auth] ERROR: Client ID: $client_id, Audience: ${audience:-<empty>}" >&2
+    echo "[auth] ERROR: Response: $response_body" >&2
+    return 1
+  fi
+
+  local token
+  token=$(echo "$response_body" | jq -r '.access_token // empty')
+  if [ -z "$token" ]; then
+    echo "[auth] ERROR: OAuth2 response missing access_token" >&2
+    echo "[auth] ERROR: Response: $response_body" >&2
+    return 1
+  fi
+
+  echo "$token"
 }
 
 # Get a token for the participant JSON API

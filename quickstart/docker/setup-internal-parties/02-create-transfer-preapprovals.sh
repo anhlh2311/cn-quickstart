@@ -37,7 +37,7 @@ PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
 VALIDATOR_API="${VALIDATOR_API:-http://localhost:2903}"
 AUTH_MODE="${AUTH_MODE:-shared-secret}"
 # Max seconds to wait for validator to accept each proposal
-POLL_TIMEOUT="${POLL_TIMEOUT:-60}"
+POLL_TIMEOUT="${POLL_TIMEOUT:-300}"
 
 # Source shared auth helpers
 source "$SCRIPT_DIR/auth.sh"
@@ -237,15 +237,17 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
 
     log "  [$((i+1))/$TOTAL_PARTIES] $PARTY_HINT: proposal created: ${PROPOSAL_CID:0:40}..."
 
-    # Poll validator API for the accepted TransferPreapproval
-    log "    Waiting for validator to accept proposal..."
+    # Poll for the accepted TransferPreapproval
+    # Tries both: (1) validator admin API and (2) direct ledger query
+    log "    Waiting for validator to accept proposal (timeout: ${POLL_TIMEOUT}s)..."
     PREAPPROVAL_CID=""
     ELAPSED=0
-    POLL_INTERVAL=3
+    POLL_INTERVAL=5
 
     while [ $ELAPSED -lt $POLL_TIMEOUT ]; do
+      # Method 1: Try validator admin API
       POLL_RESP=$(curl -s -w "\n%{http_code}" \
-        -H "Authorization: Bearer $TOKEN" \
+        -H "Authorization: Bearer $VALIDATOR_TOKEN" \
         "$VALIDATOR_API/api/validator/v0/admin/transfer-preapprovals/by-party/$PARTY_ID" 2>/dev/null || echo "")
       POLL_HTTP=$(echo "$POLL_RESP" | tail -n1 | tr -d '\r')
       POLL_BODY=$(echo "$POLL_RESP" | sed '$d')
@@ -255,15 +257,39 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
         break
       fi
 
+      # Method 2: Query ledger directly for TransferPreapproval contract
+      LEDGER_OFFSET=$(curl -s "$PARTICIPANT_JSON_API/v2/state/ledger-end" \
+        -H "Authorization: Bearer $TOKEN" | jq -r '.offset // empty' 2>/dev/null || echo "")
+      if [ -n "$LEDGER_OFFSET" ]; then
+        LEDGER_QUERY=$(jq -n --arg party "$PARTY_ID" --arg offset "$LEDGER_OFFSET" '{
+          filter: { filtersByParty: { ($party): { cumulative: [{ identifierFilter: { TemplateFilter: { value: {
+            templateId: "#splice-amulet:Splice.AmuletRules:TransferPreapproval",
+            includeCreatedEventBlob: false }}}}]}}},
+          verbose: false, activeAtOffset: $offset }')
+        LEDGER_RESP=$(curl -s "$PARTICIPANT_JSON_API/v2/state/active-contracts" \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "$LEDGER_QUERY" 2>/dev/null || echo "")
+        PREAPPROVAL_CID=$(echo "$LEDGER_RESP" | jq -r '
+          [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+        ' 2>/dev/null || echo "")
+        if [ -n "$PREAPPROVAL_CID" ]; then
+          break
+        fi
+      fi
+
       sleep $POLL_INTERVAL
       ELAPSED=$((ELAPSED + POLL_INTERVAL))
+      # Log progress every 30s
+      if [ $((ELAPSED % 30)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
+        log "    Still waiting... (${ELAPSED}s / ${POLL_TIMEOUT}s)"
+      fi
     done
 
     if [ -z "$PREAPPROVAL_CID" ]; then
-      log_error "Timeout waiting for TransferPreapproval acceptance for $PARTY_HINT after ${POLL_TIMEOUT}s"
-      log_error "The validator automation may not have processed the proposal yet."
-      log_error "Check validator logs: docker logs splice 2>&1 | grep -i preapproval"
-      exit 1
+      log "    WARNING: Timeout after ${POLL_TIMEOUT}s for $PARTY_HINT. Skipping — re-run to retry."
+      SKIPPED=$((${SKIPPED:-0} + 1))
+      continue
     fi
 
     log "    Accepted! TransferPreapproval: ${PREAPPROVAL_CID:0:40}..."
@@ -292,8 +318,12 @@ log "=========================================="
 log "Transfer Preapprovals Complete!"
 log "=========================================="
 log ""
+COMPLETED=$(jq '.preapprovals | length' "$OUTPUT_FILE")
 log "Summary:"
-log "  Total preapprovals: $TOTAL_PARTIES"
+log "  Completed: $COMPLETED / $TOTAL_PARTIES"
+if [ "${SKIPPED:-0}" -gt 0 ]; then
+  log "  Skipped (timeout): $SKIPPED — re-run the script to retry"
+fi
 log "  Provider: ${PROVIDER_PARTY:0:50}..."
 log "  Output file: $OUTPUT_FILE"
 log ""
