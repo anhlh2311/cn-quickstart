@@ -1,6 +1,9 @@
 # Copyright (c) 2026, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 # SPDX-License-Identifier: 0BSD
 
+# Force bash as a shell
+SHELL := /usr/bin/env bash
+
 # Set default goal to 'help' if no target is specified
 .DEFAULT_GOAL := help
 
@@ -16,13 +19,6 @@ export IMAGE_TAG=$(SPLICE_VERSION)
 
 ifneq (,$(wildcard .env.local))
     include .env.local
-endif
-
-# Determine if the local environment has been configured, if not inject the first-run-setup target
-ifneq ($(strip $(PARTY_HINT)),)
-FIRST_RUN_DEPENDENCY :=
-else
-FIRST_RUN_DEPENDENCY := first-run-setup
 endif
 
 ifndef MODULES_DIR
@@ -145,7 +141,17 @@ SETUP_COMMAND := ./gradlew configureProfiles --no-daemon --console=plain --quiet
 
 # Build targets
 .PHONY: build
-build: $(FIRST_RUN_DEPENDENCY) build-frontend build-backend build-daml build-docker-images ## Build frontend, backend, Daml model and docker images
+ifeq ($(strip $(PARTY_HINT)),)
+build:
+	@echo "... setting up .env.local ..."
+	$(SETUP_COMMAND)
+	@if ! grep -qE '^PARTY_HINT=.+' .env.local 2>/dev/null; then \
+	  echo "✗ ERROR: Setup did not produce a valid .env.local. Please try again."; exit 1; \
+	fi
+	@$(MAKE) --no-print-directory build
+else
+build: build-frontend build-backend build-daml build-docker-images ## Build frontend, backend, Daml model and docker images
+endif
 
 .PHONY: build-frontend
 build-frontend: ## Build the frontend application
@@ -239,7 +245,7 @@ ifneq ($(SKIP_DOWNLOADS),true) # treat “true” (or any non‑empty value) as 
 start:
 endif
 endif
-start: $(FIRST_RUN_DEPENDENCY) build ## Start the application, and observability services if enabled
+start: build ## Start the application, and observability services if enabled
 	$(call docker-compose, ${DOCKER_COMPOSE_OBSERVABILITY_FILES} $(RESOURCE_CONSTRAINT_CONFIG) up -d --no-recreate)
 
 .PHONY: start-vite-dev
@@ -320,18 +326,6 @@ setup: ## Configure the local development environment (enable DevNet/LocalNet, O
 	@echo "Starting local environment setup tool..."
 	$(SETUP_COMMAND)
 
-.PHONY: first-run-setup
-first-run-setup:
-	@echo "#########################################################################"
-	@echo "Looks like your local configuration is missing or stale."
-	@echo "Let's configure the local development environment before proceeding."
-	@echo "You can always change your configuration later by running 'make setup'."
-	@echo "#########################################################################"
-	@echo ""
-	$(SETUP_COMMAND)
-	@echo "Environment file generated, Please re-run your previous command to continue."
-	@exit 2
-
 .PHONY: integration-test
 integration-test: docker-available ## Run integration tests
 	@docker rm -f environment-init 2> /dev/null || true
@@ -402,14 +396,6 @@ clean-all-docker: docker-available ## Stop and remove all Docker containers netw
 	@echo "🗑️  Removing QS volumes (label=$(DOCKER_NETWORK))..."
 	@vids="$$(docker volume ls -q --filter "name=^$(DOCKER_NETWORK)")"; \
 	if [ -n "$$vids" ]; then docker volume rm $$vids; else echo "  (none)";fi
-
-.PHONY: install-daml-sdk
-install-daml-sdk: ## Install the Daml SDK
-	./gradlew :daml:installDamlSdk
-
-.PHONY: check-daml-sdk
-check-daml-sdk: ## Install the Daml SDK
-	./gradlew :daml:verifyDamlSdkVersion
 
 .PHONY: generate-NOTICES
 generate-NOTICES: ## Generate the NOTICES.txt file

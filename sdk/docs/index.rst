@@ -1,4 +1,4 @@
-.. Copyright (c) 2026, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+.. Copyright (c) 2026, Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved. 
 
 .. toctree::
   :maxdepth: 2
@@ -19,3 +19,4 @@
   ./sharable/sdk/quickstart/operate/lnav-in-cn
   ./sharable/sdk/quickstart/download/cnqs-installation
   ./sharable/sdk/quickstart/secure/keycloak-in-cnqs
+  ./sharable/sdk/quickstart/operate/how-to-onboard-external-parties-in-quickstart
