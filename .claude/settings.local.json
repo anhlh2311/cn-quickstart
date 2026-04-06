@@ -26,7 +26,9 @@
       "Bash(docker restart:*)",
       "Bash(curl -s http://localhost:1975/v2/version)",
       "Bash(grep -r allocation-factory /Users/lehoanganh/Working/FETCH/Angelhack/Canton/canton-exchange-backend/src --include=*.ts)",
-      "Bash(jq:*)"
+      "Bash(jq:*)",
+      "Bash(chmod +x /Users/lehoanganh/Working/FETCH/Angelhack/Canton/Quickstart/quickstart/docker/setup-internal-parties/02-create-transfer-preapprovals.sh)",
+      "Bash(find /Users/lehoanganh/Working/FETCH/Angelhack/Canton/canton-exchange-backend -type f \\\\\\(-name *.ts -o -name *.js \\\\\\))"
     ]
   }
 }
