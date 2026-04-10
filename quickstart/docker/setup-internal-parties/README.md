@@ -1,6 +1,6 @@
 # Internal Party Setup
 
-Scripts for allocating **internal parties** on a Canton participant node and setting up their Transfer Preapproval contracts.
+Scripts for allocating **internal parties** on a Canton participant node, setting up their Transfer Preapproval contracts, and funding them with Amulet (CC) tokens.
 
 ## Internal vs External Parties
 
@@ -21,8 +21,11 @@ Scripts for allocating **internal parties** on a Canton participant node and set
 
 ```bash
 cp .env.example .env
-# Edit .env — set PARTICIPANT_JSON_API, AUTH_MODE, and auth credentials
+# Edit .env — set PARTICIPANT_JSON_API, VALIDATOR_API, AUTH_MODE, and auth credentials
 ./01-allocate-internal-parties.sh
+./02-create-transfer-preapprovals.sh   # optional: enables TransferPreapproval-based transfers
+./03-distribute-amulet.sh              # optional: distribute Amulet from sender to parties
+./04-faucet-amulet.sh                  # optional: DevNet tap — direct faucet from AmuletRules
 ```
 
 ## Authentication
@@ -299,6 +302,93 @@ Before each transfer, the script re-queries the sender's active Amulet holdings 
       "inputHoldingCid": "00...",
       "changeCid": "00...",
       "changeAmount": "899.5"
+    }
+  ]
+}
+```
+
+---
+
+## Script 4: `04-faucet-amulet.sh`
+
+**DevNet only.** Directly taps Amulet (CC) to each internal party in `transfers.json` using the `AmuletRules_DevNet_Tap` choice. No sender holdings required — tokens are minted from the network.
+
+This is the simplest way to fund internal parties on a DevNet localnet. It bypasses `TransferPreapproval` and does not require scripts 02 or 03 to have been run.
+
+Unlike `utxo-handling/03-request-faucet-amulet.sh` which uses **interactive submission** for external parties, this script uses **regular `submit-and-wait`** because the parties are internal (hosted on the participant).
+
+### Prerequisites
+
+- `01-allocate-internal-parties.sh` completed (parties onboarded with Canton users)
+- `transfers.json` populated with recipient party IDs and amounts
+- Quickstart running in **DevNet mode** (`AmuletRules_DevNet_Tap` is disabled on MainNet)
+
+### Input File
+
+Reads from `transfers.json` (same format as script 03):
+
+```json
+[
+  { "recipient": "trading-partner-0::1220...", "amount": "10000.0" },
+  { "recipient": "trading-partner-1::1220...", "amount": "5000.0" }
+]
+```
+
+The `recipient` field must be a fully-qualified party ID. The user ID is derived from the hint portion (before `::`).
+
+### Usage
+
+```bash
+# Tap using default transfers.json
+./04-faucet-amulet.sh
+
+# Use a custom transfers file
+TRANSFERS_FILE=my-transfers.json ./04-faucet-amulet.sh
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARTICIPANT_JSON_API` | `http://localhost:1975` (from `internal-parties.json`) | Canton JSON API URL of the participant hosting the parties |
+| `VALIDATOR_API` | `http://localhost:1903` | Validator Admin API URL (for scan-proxy to fetch AmuletRules + OpenMiningRound) |
+| `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
+| `TRANSFERS_FILE` | `./transfers.json` | Path to transfers input file |
+
+### What It Does
+
+| Step | Action | Details |
+|------|--------|---------|
+| 1 | Fetch AmuletRules + OpenMiningRound | Calls the validator scan-proxy (`/api/validator/v0/scan-proxy/registry/allocation-instruction/v1/allocation-factory`) to get AmuletRules CID, OpenMiningRound CID, and disclosed contracts |
+| 2 | Tap Amulet per recipient | For each entry in `transfers.json`: submits `AmuletRules_DevNet_Tap` via `submit-and-wait-for-transaction` with `actAs: [recipient]`. Generates a per-user token (`get_user_token <userId>`) |
+| 3 | Write results | Writes all tapped Amulet contract IDs and total CC to `fauceted-amulet.json` |
+
+### Script 03 vs Script 04
+
+| Aspect | `03-distribute-amulet.sh` | `04-faucet-amulet.sh` |
+|--------|--------------------------|----------------------|
+| Token source | Sender's existing Amulet holdings | Minted from network (DevNet only) |
+| Requires TransferPreapproval | Yes (for each recipient) | No |
+| Works on MainNet | Yes | No |
+| Submission type | `submit-and-wait` as sender | `submit-and-wait` as each recipient |
+| Multiple holdings per party | Yes (one per `transfers.json` entry) | One per entry |
+
+### Output
+
+`fauceted-amulet.json`:
+
+```json
+{
+  "generatedAt": "2026-04-10T00:00:00Z",
+  "transfersFile": "/path/to/transfers.json",
+  "totalRecipients": 10,
+  "totalAmountCC": 33000.0,
+  "recipients": [
+    {
+      "partyId": "trading-partner-0::1220...",
+      "userId": "trading-partner-0",
+      "amount": "10000.0",
+      "amuletCid": "00abcd..."
     }
   ]
 }

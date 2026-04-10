@@ -7,8 +7,12 @@
 #   4. Creates an InstrumentConfiguration contract on the ledger (utility-registry-v0)
 #   5. Creates an AllocationFactory contract on the ledger (utility-registry-app-v0)
 #      — this single contract implements AllocationFactory, TransferFactory, AND BurnMintFactory interfaces
-#   6. Acquires disclosures (createdEventBlob) for both AllocationFactory and InstrumentConfiguration
-#   7. Writes cbtc-factories.json with factory + instrument config contract IDs and disclosures
+#   5b. Creates a TransferRule contract on the ledger (utility-registry-v0)
+#       — must be disclosed during transfers; signatory: provider+registrar=CBTC-NETWORK
+#   5c. Creates an AppRewardConfiguration contract on the ledger (utility-registry-v0)
+#       — defines operator/provider app reward split; signatory: operator=APP_USER_PARTY
+#   6. Acquires disclosures (createdEventBlob) for all four contracts
+#   7. Writes cbtc-factories.json with all contract IDs and disclosures
 #   8. Registers the token issuer in the backend (POST /token-issuer) with factory + disclosed contracts
 #
 # Prerequisites:
@@ -64,6 +68,8 @@ DB_NAME="$EXCHANGE_DB_NAME"
 # Template IDs for utility packages
 INSTRUMENT_CONFIG_TEMPLATE="#utility-registry-v0:Utility.Registry.V0.Configuration.Instrument:InstrumentConfiguration"
 ALLOCATION_FACTORY_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory"
+TRANSFER_RULE_TEMPLATE="#utility-registry-v0:Utility.Registry.V0.Rule.Transfer:TransferRule"
+APP_REWARD_CONFIG_TEMPLATE="#utility-registry-v0:Utility.Registry.V0.Configuration.AppReward:AppRewardConfiguration"
 
 ##############################################################################
 # Helper Functions
@@ -107,6 +113,13 @@ curl_check() {
   fi
 
   echo "$response_body"
+}
+
+# Get DSO party from scan-proxy
+get_dso_party() {
+  local token="$1"
+  local validator_api="$2"
+  curl_check "$validator_api/api/validator/v0/scan-proxy/dso-party-id" "$token" "application/json" | jq -r '.dso_party_id // empty'
 }
 
 # Make an HTTP request returning status code (no error on non-2xx)
@@ -759,6 +772,153 @@ else
 fi
 
 ##############################################################################
+# Step 5b: Create TransferRule contract via interactive submission
+#          (signatory: provider=CBTC_NETWORK_PARTY, registrar=CBTC_NETWORK_PARTY)
+##############################################################################
+
+log ""
+log "Step 5b: Creating TransferRule contract..."
+
+TRANSFER_RULE_CID=""
+TR_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$TRANSFER_RULE_TEMPLATE" "false" 2>/dev/null) || TR_RESPONSE=""
+
+if [ -n "$TR_RESPONSE" ]; then
+  TRANSFER_RULE_CID=$(echo "$TR_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+  ' 2>/dev/null || echo "")
+fi
+
+if [ -n "$TRANSFER_RULE_CID" ]; then
+  log "  TransferRule already exists: ${TRANSFER_RULE_CID:0:40}..."
+else
+  log "  No existing TransferRule found, creating via interactive submission..."
+
+  TR_COMMANDS=$(jq -n \
+    --arg templateId "$TRANSFER_RULE_TEMPLATE" \
+    --arg operator "$APP_USER_PARTY" \
+    --arg provider "$CBTC_NETWORK_PARTY" \
+    --arg registrar "$CBTC_NETWORK_PARTY" \
+    '[{
+      CreateCommand: {
+        templateId: $templateId,
+        createArguments: {
+          operator: $operator,
+          provider: $provider,
+          registrar: $registrar
+        }
+      }
+    }]')
+
+  TR_RESULT=$(interactive_submit "$TR_COMMANDS" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+    "create-transfer-rule" "register-cbtc-tr") || {
+    log_error "Failed to create TransferRule"
+    exit 1
+  }
+
+  TRANSFER_RULE_CID=$(echo "$TR_RESULT" | jq -r '
+    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("TransferRule")) | .contractId][0] // empty
+  ' 2>/dev/null || echo "")
+
+  if [ -n "$TRANSFER_RULE_CID" ]; then
+    log "  TransferRule created: ${TRANSFER_RULE_CID:0:40}..."
+  else
+    log_error "TransferRule command succeeded but could not extract contract ID"
+    log "  Response: $(echo "$TR_RESULT" | jq -c '.transaction.events[:3]' 2>/dev/null | head -c 500)"
+    exit 1
+  fi
+fi
+
+##############################################################################
+# Step 5c: Create AppRewardConfiguration contract via submit-and-wait
+#          (signatory: operator=APP_USER_PARTY)
+##############################################################################
+
+log ""
+log "Step 5c: Creating AppRewardConfiguration contract..."
+
+# Resolve DSO party (try backend .env first, then scan-proxy)
+DSO_PARTY=$(grep -E '^DSO=' "$BACKEND_ENV" | cut -d= -f2- | tr -d '"' 2>/dev/null || echo "")
+if [ -z "$DSO_PARTY" ]; then
+  DSO_PARTY=$(get_dso_party "$CANTON_TOKEN" "$APP_USER_VALIDATOR_API") || DSO_PARTY=""
+fi
+if [ -z "$DSO_PARTY" ]; then
+  log_error "Could not determine DSO party. Ensure the validator scan-proxy is accessible at $APP_USER_VALIDATOR_API."
+  exit 1
+fi
+log "  DSO party: ${DSO_PARTY:0:50}..."
+
+APP_REWARD_CONFIG_CID=""
+ARC_RESPONSE=$(query_active_contracts "$APP_USER_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "false" 2>/dev/null) || ARC_RESPONSE=""
+
+if [ -n "$ARC_RESPONSE" ]; then
+  APP_REWARD_CONFIG_CID=$(echo "$ARC_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+  ' 2>/dev/null || echo "")
+fi
+
+if [ -n "$APP_REWARD_CONFIG_CID" ]; then
+  log "  AppRewardConfiguration already exists: ${APP_REWARD_CONFIG_CID:0:40}..."
+else
+  log "  No existing AppRewardConfiguration found, creating via submit-and-wait..."
+
+  ARC_CMD_ID="create-app-reward-config-$(date +%s)-$RANDOM"
+  ARC_CREATE_BODY=$(jq -n \
+    --arg templateId "$APP_REWARD_CONFIG_TEMPLATE" \
+    --arg operator "$APP_USER_PARTY" \
+    --arg provider "$CBTC_NETWORK_PARTY" \
+    --arg dso "$DSO_PARTY" \
+    --arg userId "$SHARED_SECRET_USER" \
+    --arg cmdId "$ARC_CMD_ID" \
+    '{
+      commands: {
+        commands: [{
+          CreateCommand: {
+            templateId: $templateId,
+            createArguments: {
+              operator: $operator,
+              provider: $provider,
+              details: {
+                dso: $dso,
+                operatorAppRewardBeneficiary: {
+                  beneficiary: $operator,
+                  weight: "0.5"
+                }
+              }
+            }
+          }
+        }],
+        commandId: $cmdId,
+        applicationId: $userId,
+        actAs: [$operator],
+        readAs: [$provider],
+        deduplicationPeriod: { Empty: {} },
+        submissionId: $cmdId,
+        disclosedContracts: [],
+        domainId: "",
+        packageIdSelectionPreference: []
+      }
+    }')
+
+  ARC_RESULT=$(curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+    --data-raw "$ARC_CREATE_BODY") || {
+    log_error "Failed to create AppRewardConfiguration"
+    exit 1
+  }
+
+  APP_REWARD_CONFIG_CID=$(echo "$ARC_RESULT" | jq -r '
+    [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("AppRewardConfiguration")) | .contractId][0] // empty
+  ' 2>/dev/null || echo "")
+
+  if [ -n "$APP_REWARD_CONFIG_CID" ]; then
+    log "  AppRewardConfiguration created: ${APP_REWARD_CONFIG_CID:0:40}..."
+  else
+    log_error "AppRewardConfiguration command succeeded but could not extract contract ID"
+    log "  Response: $(echo "$ARC_RESULT" | jq -c '.transaction.events[:3]' 2>/dev/null | head -c 500)"
+    exit 1
+  fi
+fi
+
+##############################################################################
 # Step 6: Acquire disclosures (with createdEventBlob) for both contracts
 ##############################################################################
 
@@ -827,6 +987,70 @@ fi
 log "  InstrumentConfiguration disclosure acquired: ${INSTRUMENT_CONFIG_CID:0:40}..."
 log "  createdEventBlob length: ${#IC_BLOB}"
 
+# 6c. TransferRule disclosure
+log "  6c. TransferRule disclosure..."
+sleep 10
+
+TR_DISCLOSURE_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$TRANSFER_RULE_TEMPLATE" "true") || {
+  log_error "Failed to query TransferRule with disclosure"
+  exit 1
+}
+
+TRANSFER_RULE_DISCLOSED_CONTRACT=$(echo "$TR_DISCLOSURE_RESPONSE" | jq -c '
+  [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract][0]
+  | {
+      contractId: .createdEvent.contractId,
+      templateId: .createdEvent.templateId,
+      createdEventBlob: .createdEvent.createdEventBlob,
+      synchronizerId: .synchronizerId
+    }
+' 2>/dev/null || echo "")
+
+if [ -z "$TRANSFER_RULE_DISCLOSED_CONTRACT" ] || [ "$TRANSFER_RULE_DISCLOSED_CONTRACT" = "null" ]; then
+  log_error "Failed to extract TransferRule disclosure"
+  exit 1
+fi
+
+TR_BLOB=$(echo "$TRANSFER_RULE_DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
+if [ -z "$TR_BLOB" ]; then
+  log_error "TransferRule disclosure missing createdEventBlob"
+  exit 1
+fi
+log "  TransferRule disclosure acquired: ${TRANSFER_RULE_CID:0:40}..."
+log "  createdEventBlob length: ${#TR_BLOB}"
+
+# 6d. AppRewardConfiguration disclosure
+log "  6d. AppRewardConfiguration disclosure..."
+sleep 10
+
+ARC_DISCLOSURE_RESPONSE=$(query_active_contracts "$APP_USER_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "true") || {
+  log_error "Failed to query AppRewardConfiguration with disclosure"
+  exit 1
+}
+
+APP_REWARD_CONFIG_DISCLOSED_CONTRACT=$(echo "$ARC_DISCLOSURE_RESPONSE" | jq -c '
+  [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract][0]
+  | {
+      contractId: .createdEvent.contractId,
+      templateId: .createdEvent.templateId,
+      createdEventBlob: .createdEvent.createdEventBlob,
+      synchronizerId: .synchronizerId
+    }
+' 2>/dev/null || echo "")
+
+if [ -z "$APP_REWARD_CONFIG_DISCLOSED_CONTRACT" ] || [ "$APP_REWARD_CONFIG_DISCLOSED_CONTRACT" = "null" ]; then
+  log_error "Failed to extract AppRewardConfiguration disclosure"
+  exit 1
+fi
+
+ARC_BLOB=$(echo "$APP_REWARD_CONFIG_DISCLOSED_CONTRACT" | jq -r '.createdEventBlob // empty')
+if [ -z "$ARC_BLOB" ]; then
+  log_error "AppRewardConfiguration disclosure missing createdEventBlob"
+  exit 1
+fi
+log "  AppRewardConfiguration disclosure acquired: ${APP_REWARD_CONFIG_CID:0:40}..."
+log "  createdEventBlob length: ${#ARC_BLOB}"
+
 ##############################################################################
 # Step 7: Write cbtc-factories.json
 ##############################################################################
@@ -847,6 +1071,14 @@ jq -n \
   --arg icTemplateName "InstrumentConfiguration" \
   --arg icTemplateId "$INSTRUMENT_CONFIG_TEMPLATE" \
   --argjson icDisclosure "$INSTRUMENT_DISCLOSED_CONTRACT" \
+  --arg trCid "$TRANSFER_RULE_CID" \
+  --arg trTemplateName "TransferRule" \
+  --arg trTemplateId "$TRANSFER_RULE_TEMPLATE" \
+  --argjson trDisclosure "$TRANSFER_RULE_DISCLOSED_CONTRACT" \
+  --arg arcCid "$APP_REWARD_CONFIG_CID" \
+  --arg arcTemplateName "AppRewardConfiguration" \
+  --arg arcTemplateId "$APP_REWARD_CONFIG_TEMPLATE" \
+  --argjson arcDisclosure "$APP_REWARD_CONFIG_DISCLOSED_CONTRACT" \
   '{
     generatedAt: $generatedAt,
     cbtcNetworkParty: $cbtcNetworkParty,
@@ -863,12 +1095,26 @@ jq -n \
       templateName: $icTemplateName,
       templateId: $icTemplateId,
       disclosure: $icDisclosure
+    },
+    transferRule: {
+      contractId: $trCid,
+      templateName: $trTemplateName,
+      templateId: $trTemplateId,
+      disclosure: $trDisclosure
+    },
+    appRewardConfiguration: {
+      contractId: $arcCid,
+      templateName: $arcTemplateName,
+      templateId: $arcTemplateId,
+      disclosure: $arcDisclosure
     }
   }' > "$FACTORIES_FILE"
 
 log "  Written to: $FACTORIES_FILE"
 log "  AllocationFactory CID: ${ALLOCATION_FACTORY_CID:0:40}..."
 log "  InstrumentConfiguration CID: ${INSTRUMENT_CONFIG_CID:0:40}..."
+log "  TransferRule CID: ${TRANSFER_RULE_CID:0:40}..."
+log "  AppRewardConfiguration CID: ${APP_REWARD_CONFIG_CID:0:40}..."
 
 ##############################################################################
 # Step 8: Register token issuer in backend (POST /token-issuer)
@@ -972,6 +1218,8 @@ log "  Keypair file: $KEYPAIR_FILE"
 log "  Factories file: $FACTORIES_FILE"
 log "  AllocationFactory CID: $ALLOCATION_FACTORY_CID"
 log "  InstrumentConfiguration CID: $INSTRUMENT_CONFIG_CID"
+log "  TransferRule CID: $TRANSFER_RULE_CID"
+log "  AppRewardConfiguration CID: $APP_REWARD_CONFIG_CID"
 log "  Token issuer: $CBTC_TOKEN_ID ($CBTC_DISPLAY_NAME)"
 log ""
 log "Verify:"

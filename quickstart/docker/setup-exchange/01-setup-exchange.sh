@@ -680,21 +680,17 @@ SWAGGER_PASSWORD=$SWAGGER_PASSWORD
 ADMIN_API_KEY=$ADMIN_API_KEY
 WHITELIST_VERIFICATION_CODE=$WHITELIST_VERIFICATION_CODE
 
-# QCP
-QCP_API_URL=$BACKEND_URL
-QCP_API_KEY=
-
 # Chainlink Data Streams (placeholder - not available locally)
 CHAINLINK_API_URL=$CHAINLINK_API_URL
 CHAINLINK_API_KEY=$CHAINLINK_API_KEY
 CHAINLINK_API_SECRET=$CHAINLINK_API_SECRET
 
-# Transfer token interfaces (placeholder - not available locally)
+# Transfer token interfaces
 UTILITIES_API_URL=$UTILITIES_API_URL
-TRANSFERFACTORY_INTERFACE=$TRANSFERFACTORY_INTERFACE
-HOLDING_INTERFACE=$HOLDING_INTERFACE
-TRANSFER_INSTRUCTION_INTERFACE=$TRANSFER_INSTRUCTION_INTERFACE
-CBTC_TRANSFER_OFFER_TEMPLATE_ID=
+TRANSFERFACTORY_INTERFACE=#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory
+HOLDING_INTERFACE=#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding
+TRANSFER_INSTRUCTION_INTERFACE=#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction
+CBTC_TRANSFER_OFFER_TEMPLATE_ID=#utility-registry-app-v0:Utility.Registry.App.V0.Model.Transfer:TransferOffer
 
 # DSO (resolved from local network)
 DSO=$DSO_PARTY
