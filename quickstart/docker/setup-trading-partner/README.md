@@ -14,7 +14,8 @@ Scripts for setting up the trading-partner validator node on the quickstart loca
 cp .env.example .env
 # Edit .env if needed (defaults work for standard quickstart)
 ./01-setup-trading-partner.sh
-./02-request-partner-api-key.sh
+./02-allocate-and-fund-trader.sh
+./03-request-partner-api-key.sh
 ```
 
 ## Scripts
@@ -22,7 +23,10 @@ cp .env.example .env
 | Script | Description |
 |--------|-------------|
 | `01-setup-trading-partner.sh` | Upload DARs, resolve party IDs, write `trading-partner-config.json` |
-| `02-request-partner-api-key.sh` | Issue a partner API key from the exchange backend, write `partner-api-key.json` + `trade-request-config.json` |
+| `02-allocate-and-fund-trader.sh` | Allocate trader party, create TransferPreapproval, faucet Amulet — write `internal-trader.json` |
+| `03-request-partner-api-key.sh` | Issue a partner API key from the exchange backend, write `partner-api-key.json` + `trade-request-config.json` |
+| `04-withdraw-allocation.sh` | Withdraw a trader's locked `AmuletAllocation` (use after a failed/expired trade to reclaim input tokens) |
+| `05-faucet-cbtc.sh` | Mint CBTC holdings to an internal party on the trading-partner node |
 | `test-trade-request.sh` | End-to-end test: create TradeProposal on trading-partner node → call `POST /trading-partner/trade-request` |
 
 ---
@@ -111,7 +115,62 @@ The trading-partner always uses shared-secret auth (no Keycloak realm configured
 
 ---
 
-## Script 2: `02-request-partner-api-key.sh`
+## Script 2: `02-allocate-and-fund-trader.sh`
+
+Allocates a trader party on the trading-partner node, creates a `TransferPreapproval`, and faucets Amulet to the party. Writes `internal-trader.json` which is used by downstream scripts as a drop-in for `setup-internal-parties/internal-parties.json`.
+
+### Prerequisites
+
+- `01-setup-trading-partner.sh` completed
+- Trading-partner node running (port 1975 / validator 1903)
+- Quickstart running in DevNet mode (`AmuletRules_DevNet_Tap` must be available)
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARTY_HINT_PREFIX` | `trader` | Prefix for the party hint; party is named `<prefix>-0` |
+| `FAUCET_AMOUNT` | `1000000` | Amulet (CC) to faucet to the trader |
+
+### What It Does
+
+| Step | Action |
+|------|--------|
+| 1 | Allocates party `<PARTY_HINT_PREFIX>-0` on the trading-partner participant |
+| 2 | Creates Canton user + grants `ActAs`/`ReadAs` rights |
+| 3 | Creates `TransferPreapprovalProposal` and polls until validator automation accepts it |
+| 4 | Faucets `FAUCET_AMOUNT` CC via `AmuletRules_DevNet_Tap` (scan-proxy for `AmuletRules` + `OpenMiningRound`) |
+| 5 | Writes `internal-trader.json` |
+
+### Output
+
+**`internal-trader.json`**:
+
+```json
+{
+  "generatedAt": "2026-04-10T00:00:00Z",
+  "participantId": "participant::1220...",
+  "participantJsonApi": "http://localhost:1975",
+  "validatorApi": "http://localhost:1903",
+  "partyHintPrefix": "trader",
+  "parties": [{
+    "index": 0,
+    "partyHint": "trader-0",
+    "partyId": "trader-0::1220...",
+    "userId": "trader-0",
+    "displayName": "trader 0",
+    "transferPreapprovalCid": "00...",
+    "faucetedAmount": "1000000",
+    "faucetedAmuletCid": "00..."
+  }]
+}
+```
+
+The `parties` array matches the shape of `setup-internal-parties/internal-parties.json`, so all scripts that fall back to that file will automatically pick up the trader from `internal-trader.json` first.
+
+---
+
+## Script 3: `03-request-partner-api-key.sh`
 
 Issues a partner API key from the canton-exchange-backend for use by the trading partner. Also writes a `trade-request-config.json` with default trade parameters that `test-trade-request.sh` reads.
 
@@ -181,22 +240,19 @@ Edit `trade-request-config.json` to change the swap amount or token types before
 
 ---
 
-## Script 3: `test-trade-request.sh`
+## Script 4 (test): `test-trade-request.sh`
 
 End-to-end test for `POST /trading-partner/trade-request`. Simulates the full partner trade flow from the trading-partner node's perspective.
 
 ### Prerequisites
 
 - `01-setup-trading-partner.sh` completed
-- `02-request-partner-api-key.sh` completed (`partner-api-key.json` and `trade-request-config.json` exist)
+- `02-allocate-and-fund-trader.sh` completed (`internal-trader.json` exists with funded trader)
+- `03-request-partner-api-key.sh` completed (`partner-api-key.json` and `trade-request-config.json` exist)
 - Exchange backend running and fully configured (scripts 01–07 in `setup-exchange/`)
-- Trader party onboarded with Amulet holdings on the trading-partner node:
-  ```bash
-  # Onboard traders (setup-internal-parties/)
-  cd ../setup-internal-parties
-  ./01-allocate-internal-parties.sh
-  ./04-faucet-amulet.sh
-  ```
+- Trader has sufficient input-token holdings on the trading-partner node:
+  - Amulet: provided by `02-allocate-and-fund-trader.sh` (default 1,000,000 CC)
+  - CBTC: use `05-faucet-cbtc.sh` or ensure CBTC `Holding` contracts exist on the trading-partner node
 
 ### Configuration
 
@@ -205,23 +261,46 @@ Config is loaded automatically from `trade-request-config.json`. All values can 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PARTNER_API_KEY` | from `partner-api-key.json` | `x-api-key` for the exchange backend partner API |
-| `TRADER_PARTY_ID` | first party in `internal-parties.json` | Fully qualified trader party ID |
-| `TRADER_USER_ID` | from `internal-parties.json` | Trader's Canton user ID |
+| `TRADER_PARTY_ID` | from `internal-trader.json` | Fully qualified trader party ID |
+| `TRADER_USER_ID` | from `internal-trader.json` | Trader's Canton user ID |
 | `INPUT_AMOUNT` | `10` (from `trade-request-config.json`) | Amount of input token to swap |
 | `INPUT_TOKEN_TYPE` | `Amulet` | Input token (`Amulet` or `CBTC`) |
-| `OUTPUT_TOKEN_TYPE` | `CBTC` | Output token |
+| `OUTPUT_TOKEN_TYPE` | `CBTC` | Output token (`CBTC` or `Amulet`) |
+| `TRADING_PARTNER_JSON_API` | `http://localhost:1975` | Trading-partner node JSON API URL |
+| `APP_PROVIDER_JSON_API` | `http://localhost:3975` | App-provider (exchange) node JSON API URL — queried for lingering `TradeEscrow` contracts |
+| `SKIP_ESCROW_SETTLE` | _(unset)_ | Set to `true` to skip settling lingering `TradeEscrow` contracts in step 3b |
 
 ### What It Does
 
 | Step | Action |
 |------|--------|
 | 1 | Fetches `TradeProposalFactory` disclosure from `GET /partner-api/trade-proposal-factory` |
-| 2 | Fetches Amulet allocation factory from the validator scan-proxy |
-| 3 | Queries the trader's Amulet holdings from the trading-partner node |
-| 4 | Creates a `TradeProposal` on the trading-partner node via `submit-and-wait` |
-| 5 | Queries disclosures for the created `TradeProposal` contract |
+| 2 | Fetches the input-token allocation factory — Amulet: from the validator scan-proxy; CBTC: from `GET /token-issuer/token/CBTC` |
+| 2b | Fetches token prices from `GET /partner-api/token-prices` to calculate `expectedReceiverAmount` |
+| 3 | Queries trader's input-token holdings from the trading-partner node, sorted by amount ascending; accumulates the minimum set of holdings whose total ≥ `INPUT_AMOUNT` |
+| 3b | **Checks for lingering `TradeEscrow` contracts** on the app-provider node (LP's participant). If any are found, displays their details and offers to settle each one via `POST /trading-partner/settle-trade-escrow`. Use this to recover from trades where `AcceptAndAllocate` succeeded but settlement did not complete. |
+| 4 | Creates (or reuses) a `TradeProposal` on the trading-partner node via `submit-and-wait` |
+| 5 | Fetches `LockedAmulet` blob(s) from the trading-partner node |
 | 6 | Calls `POST /trading-partner/trade-request` with the proposal CID and disclosures |
 | 7 | Verifies the response `status == "SUCCEEDED"` |
+
+### Settling Lingering TradeEscrows (Step 3b)
+
+A `TradeEscrow` is left on-chain when `AcceptAndAllocate` succeeded but the settle step did not complete (e.g., backend timeout, crash). In this state the LP's output token allocation is locked and a new trade cannot be started until it is settled or expires.
+
+**Default behaviour**: lingering escrows are always settled — automatically in non-interactive mode (no TTY), or after an interactive prompt when a TTY is detected:
+
+```
+[test] Settle this TradeEscrow? [y=settle / n=skip / Ctrl+C=abort]:
+```
+
+Settle flow:
+1. Fetch the `senderAllocation` blob (trader's Amulet allocation) from the trading-partner node (falls back to app-provider)
+2. Fetch the `receiverAllocation` blob (LP's locked output-token holding) from the app-provider node
+3. Fetch all active `LockedAmulet` blobs for the trader from the trading-partner node
+4. `POST /trading-partner/settle-trade-escrow` — exchange backend fetches token contexts and submits `TradeEscrow_Settle`
+
+To skip settlement, set `SKIP_ESCROW_SETTLE=true`.
 
 ### Usage
 
@@ -234,6 +313,9 @@ INPUT_AMOUNT=50 ./test-trade-request.sh
 
 # Override trader
 TRADER_PARTY_ID="trader-1::1220..." TRADER_USER_ID="trader-1" ./test-trade-request.sh
+
+# Swap CBTC → Amulet
+INPUT_AMOUNT=1 INPUT_TOKEN_TYPE=CBTC OUTPUT_TOKEN_TYPE=Amulet SKIP_ESCROW_SETTLE=true ./test-trade-request.sh
 ```
 
 ---
@@ -251,20 +333,18 @@ cd ../setup-exchange
 ./06-fund-liquidity-provider.sh
 ./07-create-trade-proposal-factory.sh
 
-# 2. Onboard traders on the trading-partner node (setup-internal-parties/)
-cd ../setup-internal-parties
-cp .env.example .env
-# Edit .env: set PARTICIPANT_JSON_API=http://localhost:1975, VALIDATOR_API=http://localhost:1903
-./01-allocate-internal-parties.sh
-# Edit transfers.json with trader party IDs and desired amounts
-./04-faucet-amulet.sh
-
-# 3. Trading partner setup
+# 2. Trading partner setup
 cd ../setup-trading-partner
+cp .env.example .env
+# Edit .env if needed (defaults work for standard quickstart)
 ./01-setup-trading-partner.sh
-./02-request-partner-api-key.sh
+./02-allocate-and-fund-trader.sh     # allocates trader-0, faucets 1,000,000 CC
+./03-request-partner-api-key.sh
 # Optionally edit trade-request-config.json to change swap amount/tokens
 
-# 4. Run the test
+# 3. Run the test (Amulet → CBTC)
 ./test-trade-request.sh
+
+# Or run CBTC → Amulet (ensure trader has CBTC Holdings; use 05-faucet-cbtc.sh if needed)
+INPUT_AMOUNT=1 INPUT_TOKEN_TYPE=CBTC OUTPUT_TOKEN_TYPE=Amulet SKIP_ESCROW_SETTLE=true ./test-trade-request.sh
 ```

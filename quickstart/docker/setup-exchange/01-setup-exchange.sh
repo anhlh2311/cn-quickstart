@@ -671,6 +671,9 @@ AMULET_ALLOCATION_TEMPLATE_ID="#splice-amulet:Splice.AmuletAllocation:AmuletAllo
 MERGE_DELEGATION_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegation"
 MERGE_DELEGATION_PROPOSAL_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:MergeDelegationProposal"
 BATCH_MERGE_UTILITY_TEMPLATE_ID="#splice-util-token-standard-wallet:Splice.Util.Token.Wallet.MergeDelegation:BatchMergeUtility"
+TRADE_PROPOSAL_FACTORY_TEMPLATE_ID="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory"
+TRADE_PROPOSAL_TEMPLATE_ID="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposal:TradeProposal"
+TRADE_ESCROW_TEMPLATE_ID="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeEscrow:TradeEscrow"
 
 # Swagger
 SWAGGER_USERNAME=$SWAGGER_USERNAME

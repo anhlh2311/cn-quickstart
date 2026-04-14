@@ -155,27 +155,7 @@ generate_canton_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
-# Generate a backend JWT for the setup user
-generate_backend_jwt() {
-  local user_id="$1"
-  local email="$2"
-  local now
-  now=$(date +%s)
-  local exp=$((now + 86400))
 
-  b64url() {
-    openssl enc -base64 -A | tr '+/' '-_' | tr -d '='
-  }
-
-  local header
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload
-  payload=$(printf '{"sub":"%s","email":"%s","iat":%d,"exp":%d}' "$user_id" "$email" "$now" "$exp" | b64url)
-  local signature
-  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$BACKEND_JWT_SECRET" -binary | b64url)
-
-  echo "${header}.${payload}.${signature}"
-}
 
 # Query active contracts by party and template
 query_active_contracts() {
@@ -373,21 +353,6 @@ log "  Backend is running at $BACKEND_URL"
 
 # Generate Canton token for app-user participant (admin operations)
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
-
-# Ensure setup user exists in backend DB and generate backend JWT
-log "  Ensuring setup user exists in database..."
-UPSERT_SQL="INSERT INTO users (id, email, username, password, first_name, last_name, is_active) VALUES ('$SETUP_USER_ID', '$SETUP_USER_EMAIL', '$SETUP_USER_NAME', 'setup-no-login', 'Setup', 'Script', true) ON CONFLICT (id) DO NOTHING;"
-
-if command -v psql > /dev/null 2>&1; then
-  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL" 2>/dev/null || \
-    docker exec -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-      psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL"
-else
-  docker exec -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-    psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL"
-fi
-
-BACKEND_TOKEN=$(generate_backend_jwt "$SETUP_USER_ID" "$SETUP_USER_EMAIL")
 
 ##############################################################################
 # Step 1: Generate / load Ed25519 keypair (idempotent)
@@ -700,9 +665,22 @@ else
     exit 1
   }
 
+  log "  Waiting 10s for ledger to settle..."
+  sleep 10
+
   INSTRUMENT_CONFIG_CID=$(echo "$IC_RESULT" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("InstrumentConfiguration")) | .contractId][0] // empty
   ' 2>/dev/null || echo "")
+
+  if [ -z "$INSTRUMENT_CONFIG_CID" ]; then
+    log "  CID not in response, querying ledger for active InstrumentConfiguration..."
+    IC_QUERY=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$INSTRUMENT_CONFIG_TEMPLATE" "false" 2>/dev/null) || IC_QUERY=""
+    if [ -n "$IC_QUERY" ]; then
+      INSTRUMENT_CONFIG_CID=$(echo "$IC_QUERY" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+      ' 2>/dev/null || echo "")
+    fi
+  fi
 
   if [ -n "$INSTRUMENT_CONFIG_CID" ]; then
     log "  InstrumentConfiguration created: ${INSTRUMENT_CONFIG_CID:0:40}..."
@@ -758,9 +736,22 @@ else
     exit 1
   }
 
+  log "  Waiting 10s for ledger to settle..."
+  sleep 10
+
   ALLOCATION_FACTORY_CID=$(echo "$AF_RESULT" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("AllocationFactory")) | .contractId][0] // empty
   ' 2>/dev/null || echo "")
+
+  if [ -z "$ALLOCATION_FACTORY_CID" ]; then
+    log "  CID not in response, querying ledger for active AllocationFactory..."
+    AF_QUERY=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$ALLOCATION_FACTORY_TEMPLATE" "false" 2>/dev/null) || AF_QUERY=""
+    if [ -n "$AF_QUERY" ]; then
+      ALLOCATION_FACTORY_CID=$(echo "$AF_QUERY" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+      ' 2>/dev/null || echo "")
+    fi
+  fi
 
   if [ -n "$ALLOCATION_FACTORY_CID" ]; then
     log "  AllocationFactory created: ${ALLOCATION_FACTORY_CID:0:40}..."
@@ -789,13 +780,49 @@ if [ -n "$TR_RESPONSE" ]; then
 fi
 
 if [ -n "$TRANSFER_RULE_CID" ]; then
-  log "  TransferRule already exists: ${TRANSFER_RULE_CID:0:40}..."
-else
+  # Check operator field — must be CBTC_NETWORK_PARTY, not executor/app-user party
+  EXISTING_TR_OPERATOR=$(echo "$TR_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) |
+      .contractEntry.JsActiveContract.createdEvent.createArgument.operator
+    ][0] // empty
+  ' 2>/dev/null || echo "")
+
+  if [ -n "$EXISTING_TR_OPERATOR" ] && [ "$EXISTING_TR_OPERATOR" != "$CBTC_NETWORK_PARTY" ]; then
+    log "  Existing TransferRule has wrong operator: ${EXISTING_TR_OPERATOR:0:60}"
+    log "  Expected operator:                        ${CBTC_NETWORK_PARTY:0:60}"
+    log "  Archiving old TransferRule and recreating with correct operator..."
+
+    ARCHIVE_CMD=$(jq -n \
+      --arg templateId "$TRANSFER_RULE_TEMPLATE" \
+      --arg cid "$TRANSFER_RULE_CID" \
+      '[{
+        ExerciseCommand: {
+          templateId: $templateId,
+          contractId: $cid,
+          choice: "Archive",
+          choiceArgument: {}
+        }
+      }]')
+
+    interactive_submit "$ARCHIVE_CMD" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+      "archive-transfer-rule" "archive-tr" > /dev/null || {
+      log_error "Failed to archive old TransferRule (operator mismatch)"
+      exit 1
+    }
+    log "  Old TransferRule archived. Waiting 10s for ledger to settle..."
+    sleep 10
+    TRANSFER_RULE_CID=""
+  else
+    log "  TransferRule already exists with correct operator: ${TRANSFER_RULE_CID:0:40}..."
+  fi
+fi
+
+if [ -z "$TRANSFER_RULE_CID" ]; then
   log "  No existing TransferRule found, creating via interactive submission..."
 
   TR_COMMANDS=$(jq -n \
     --arg templateId "$TRANSFER_RULE_TEMPLATE" \
-    --arg operator "$APP_USER_PARTY" \
+    --arg operator "$CBTC_NETWORK_PARTY" \
     --arg provider "$CBTC_NETWORK_PARTY" \
     --arg registrar "$CBTC_NETWORK_PARTY" \
     '[{
@@ -815,9 +842,23 @@ else
     exit 1
   }
 
+  log "  Waiting 10s for ledger to settle..."
+  sleep 10
+
   TRANSFER_RULE_CID=$(echo "$TR_RESULT" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("TransferRule")) | .contractId][0] // empty
   ' 2>/dev/null || echo "")
+
+  # Fallback: if not found in response, query ledger (contract is settled after 10s sleep)
+  if [ -z "$TRANSFER_RULE_CID" ]; then
+    log "  CID not in response, querying ledger for active TransferRule..."
+    TR_QUERY=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$TRANSFER_RULE_TEMPLATE" "false" 2>/dev/null) || TR_QUERY=""
+    if [ -n "$TR_QUERY" ]; then
+      TRANSFER_RULE_CID=$(echo "$TR_QUERY" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+      ' 2>/dev/null || echo "")
+    fi
+  fi
 
   if [ -n "$TRANSFER_RULE_CID" ]; then
     log "  TransferRule created: ${TRANSFER_RULE_CID:0:40}..."
@@ -829,8 +870,8 @@ else
 fi
 
 ##############################################################################
-# Step 5c: Create AppRewardConfiguration contract via submit-and-wait
-#          (signatory: operator=APP_USER_PARTY)
+# Step 5c: Create AppRewardConfiguration contract via interactive submission
+#          operator=CBTC_NETWORK_PARTY, provider=CBTC_NETWORK_PARTY (same pattern as AllocationFactory/TransferRule)
 ##############################################################################
 
 log ""
@@ -848,7 +889,7 @@ fi
 log "  DSO party: ${DSO_PARTY:0:50}..."
 
 APP_REWARD_CONFIG_CID=""
-ARC_RESPONSE=$(query_active_contracts "$APP_USER_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "false" 2>/dev/null) || ARC_RESPONSE=""
+ARC_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "false" 2>/dev/null) || ARC_RESPONSE=""
 
 if [ -n "$ARC_RESPONSE" ]; then
   APP_REWARD_CONFIG_CID=$(echo "$ARC_RESPONSE" | jq -r '
@@ -857,57 +898,90 @@ if [ -n "$ARC_RESPONSE" ]; then
 fi
 
 if [ -n "$APP_REWARD_CONFIG_CID" ]; then
-  log "  AppRewardConfiguration already exists: ${APP_REWARD_CONFIG_CID:0:40}..."
-else
-  log "  No existing AppRewardConfiguration found, creating via submit-and-wait..."
+  # Validate operator field — must be CBTC_NETWORK_PARTY (same pattern as AllocationFactory/TransferRule)
+  EXISTING_ARC_OPERATOR=$(echo "$ARC_RESPONSE" | jq -r '
+    [.[] | select(.contractEntry.JsActiveContract) |
+      .contractEntry.JsActiveContract.createdEvent.createArgument.operator
+    ][0] // empty
+  ' 2>/dev/null || echo "")
 
-  ARC_CMD_ID="create-app-reward-config-$(date +%s)-$RANDOM"
-  ARC_CREATE_BODY=$(jq -n \
+  if [ -n "$EXISTING_ARC_OPERATOR" ] && [ "$EXISTING_ARC_OPERATOR" != "$CBTC_NETWORK_PARTY" ]; then
+    log "  Existing AppRewardConfiguration has wrong operator: ${EXISTING_ARC_OPERATOR:0:60}"
+    log "  Expected operator:                                  ${CBTC_NETWORK_PARTY:0:60}"
+    log "  Archiving old AppRewardConfiguration and recreating with correct operator..."
+
+    ARC_ARCHIVE_CMD=$(jq -n \
+      --arg templateId "$APP_REWARD_CONFIG_TEMPLATE" \
+      --arg cid "$APP_REWARD_CONFIG_CID" \
+      '[{
+        ExerciseCommand: {
+          templateId: $templateId,
+          contractId: $cid,
+          choice: "Archive",
+          choiceArgument: {}
+        }
+      }]')
+
+    interactive_submit "$ARC_ARCHIVE_CMD" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+      "archive-app-reward-config" "archive-arc" > /dev/null || {
+      log_error "Failed to archive old AppRewardConfiguration (operator mismatch)"
+      exit 1
+    }
+    log "  Old AppRewardConfiguration archived. Waiting 10s for ledger to settle..."
+    sleep 10
+    APP_REWARD_CONFIG_CID=""
+  else
+    log "  AppRewardConfiguration already exists with correct operator: ${APP_REWARD_CONFIG_CID:0:40}..."
+  fi
+fi
+
+if [ -z "$APP_REWARD_CONFIG_CID" ]; then
+  log "  No existing AppRewardConfiguration found, creating via interactive submission..."
+
+  ARC_COMMANDS=$(jq -n \
     --arg templateId "$APP_REWARD_CONFIG_TEMPLATE" \
-    --arg operator "$APP_USER_PARTY" \
+    --arg operator "$CBTC_NETWORK_PARTY" \
     --arg provider "$CBTC_NETWORK_PARTY" \
     --arg dso "$DSO_PARTY" \
-    --arg userId "$SHARED_SECRET_USER" \
-    --arg cmdId "$ARC_CMD_ID" \
-    '{
-      commands: {
-        commands: [{
-          CreateCommand: {
-            templateId: $templateId,
-            createArguments: {
-              operator: $operator,
-              provider: $provider,
-              details: {
-                dso: $dso,
-                operatorAppRewardBeneficiary: {
-                  beneficiary: $operator,
-                  weight: "0.5"
-                }
-              }
+    '[{
+      CreateCommand: {
+        templateId: $templateId,
+        createArguments: {
+          operator: $operator,
+          provider: $provider,
+          details: {
+            dso: $dso,
+            operatorAppRewardBeneficiary: {
+              beneficiary: $operator,
+              weight: "0.5"
             }
           }
-        }],
-        commandId: $cmdId,
-        applicationId: $userId,
-        actAs: [$operator],
-        readAs: [$provider],
-        deduplicationPeriod: { Empty: {} },
-        submissionId: $cmdId,
-        disclosedContracts: [],
-        domainId: "",
-        packageIdSelectionPreference: []
+        }
       }
-    }')
+    }]')
 
-  ARC_RESULT=$(curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
-    --data-raw "$ARC_CREATE_BODY") || {
+  ARC_RESULT=$(interactive_submit "$ARC_COMMANDS" "$CBTC_NETWORK_PARTY" "$KEYPAIR_PRIV" "$KEYPAIR_FP" \
+    "create-app-reward-config" "register-cbtc-arc") || {
     log_error "Failed to create AppRewardConfiguration"
     exit 1
   }
 
+  log "  Waiting 10s for ledger to settle..."
+  sleep 10
+
   APP_REWARD_CONFIG_CID=$(echo "$ARC_RESULT" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty) | select(.templateId | tostring | contains("AppRewardConfiguration")) | .contractId][0] // empty
   ' 2>/dev/null || echo "")
+
+  if [ -z "$APP_REWARD_CONFIG_CID" ]; then
+    log "  CID not in response, querying ledger for active AppRewardConfiguration..."
+    ARC_QUERY=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "false" 2>/dev/null) || ARC_QUERY=""
+    if [ -n "$ARC_QUERY" ]; then
+      APP_REWARD_CONFIG_CID=$(echo "$ARC_QUERY" | jq -r '
+        [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
+      ' 2>/dev/null || echo "")
+    fi
+  fi
 
   if [ -n "$APP_REWARD_CONFIG_CID" ]; then
     log "  AppRewardConfiguration created: ${APP_REWARD_CONFIG_CID:0:40}..."
@@ -1023,7 +1097,7 @@ log "  createdEventBlob length: ${#TR_BLOB}"
 log "  6d. AppRewardConfiguration disclosure..."
 sleep 10
 
-ARC_DISCLOSURE_RESPONSE=$(query_active_contracts "$APP_USER_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "true") || {
+ARC_DISCLOSURE_RESPONSE=$(query_active_contracts "$CBTC_NETWORK_PARTY" "$APP_REWARD_CONFIG_TEMPLATE" "true") || {
   log_error "Failed to query AppRewardConfiguration with disclosure"
   exit 1
 }
@@ -1117,91 +1191,110 @@ log "  TransferRule CID: ${TRANSFER_RULE_CID:0:40}..."
 log "  AppRewardConfiguration CID: ${APP_REWARD_CONFIG_CID:0:40}..."
 
 ##############################################################################
-# Step 8: Register token issuer in backend (POST /token-issuer)
+# Step 8: Upsert CBTC token issuer directly into database
 # Note: allocation_factories table was dropped — factory data (factoryContractId,
 # discloseContracts, choiceContextData) is now stored directly in token_issuers.
 ##############################################################################
 
 log ""
-log "Step 8: Registering CBTC token issuer in backend..."
+log "Step 8: Upserting CBTC token issuer into database..."
 
-# Check if already registered
-EXISTING_ISSUER=$(curl -sf "$BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID" \
-  -H "Authorization: Bearer $BACKEND_TOKEN" 2>/dev/null || echo "")
+# Build the full discloseContracts and choiceContextData including TransferRule
+DISCLOSE_CONTRACTS=$(jq -n \
+  --argjson alloc "$ALLOC_DISCLOSED_CONTRACT" \
+  --argjson ic "$INSTRUMENT_DISCLOSED_CONTRACT" \
+  --argjson tr "$TRANSFER_RULE_DISCLOSED_CONTRACT" \
+  '[$alloc, $ic, $tr]')
 
-if [ -n "$EXISTING_ISSUER" ] && echo "$EXISTING_ISSUER" | jq -e '.data.tokenId // .tokenId' > /dev/null 2>&1; then
-  EXISTING_TOKEN_ID=$(echo "$EXISTING_ISSUER" | jq -r '.data.tokenId // .tokenId')
-  log "  Token issuer already registered: tokenId=$EXISTING_TOKEN_ID"
+CHOICE_CONTEXT_DATA=$(jq -n \
+  --arg icCid "$INSTRUMENT_CONFIG_CID" \
+  --arg trCid "$TRANSFER_RULE_CID" \
+  '{
+    values: {
+      "sender-credentials": { tag: "AV_List", value: [] },
+      "instrument-configuration": { tag: "AV_ContractId", value: $icCid },
+      "utility.digitalasset.com/transfer-rule": { tag: "AV_ContractId", value: $trCid },
+      "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
+      "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] },
+      "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid }
+    }
+  }')
+
+# Write SQL to a temp file to safely handle JSONB data (avoids shell escaping issues)
+UPSERT_SQL_FILE=$(mktemp /tmp/cbtc-token-issuer-upsert.XXXXXX.sql)
+
+# Escape single quotes in JSON values for SQL (double them)
+_ESC_DISCLOSE=$(echo "$DISCLOSE_CONTRACTS" | sed "s/'/''/g")
+_ESC_CHOICE=$(echo "$CHOICE_CONTEXT_DATA" | sed "s/'/''/g")
+_ESC_ADMIN=$(echo "$CBTC_NETWORK_PARTY" | sed "s/'/''/g")
+_ESC_FACTORY=$(echo "$ALLOCATION_FACTORY_CID" | sed "s/'/''/g")
+
+cat > "$UPSERT_SQL_FILE" <<ENDSQL
+INSERT INTO token_issuers (
+  id, admin, token_id, registrar, factory_contract_id,
+  symbol, display_name, price_source_id, metadata,
+  disclose_contracts, choice_context_data, created_at, updated_at
+) VALUES (
+  gen_random_uuid(),
+  '${_ESC_ADMIN}',
+  '${CBTC_TOKEN_ID}',
+  '${_ESC_ADMIN}',
+  '${_ESC_FACTORY}',
+  '${CBTC_SYMBOL}',
+  '${CBTC_DISPLAY_NAME}',
+  '${CBTC_PRICE_SOURCE_ID}',
+  '{}'::jsonb,
+  '${_ESC_DISCLOSE}'::jsonb,
+  '${_ESC_CHOICE}'::jsonb,
+  NOW(),
+  NOW()
+)
+ON CONFLICT (token_id) DO UPDATE SET
+  admin               = EXCLUDED.admin,
+  registrar           = EXCLUDED.registrar,
+  factory_contract_id = EXCLUDED.factory_contract_id,
+  symbol              = EXCLUDED.symbol,
+  display_name        = EXCLUDED.display_name,
+  price_source_id     = EXCLUDED.price_source_id,
+  disclose_contracts  = EXCLUDED.disclose_contracts,
+  choice_context_data = EXCLUDED.choice_context_data,
+  updated_at          = NOW();
+ENDSQL
+
+if command -v psql > /dev/null 2>&1; then
+  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_NAME" -q -f "$UPSERT_SQL_FILE" 2>/dev/null || \
+    docker exec -i -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
+      psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q < "$UPSERT_SQL_FILE"
 else
-  # Reuse the same disclose contracts and choice context data from Step 8
-  if [ -z "$DISCLOSE_CONTRACTS" ]; then
-    DISCLOSE_CONTRACTS=$(jq -n \
-      --argjson alloc "$ALLOC_DISCLOSED_CONTRACT" \
-      --argjson ic "$INSTRUMENT_DISCLOSED_CONTRACT" \
-      '[$alloc, $ic]')
-  fi
-  if [ -z "$CHOICE_CONTEXT_DATA" ]; then
-    CHOICE_CONTEXT_DATA=$(jq -n \
-      --arg icCid "$INSTRUMENT_CONFIG_CID" \
-      '{
-        values: {
-          "sender-credentials": { tag: "AV_List", value: [] },
-          "instrument-configuration": { tag: "AV_ContractId", value: $icCid },
-          "utility.digitalasset.com/sender-credentials": { tag: "AV_List", value: [] },
-          "utility.digitalasset.com/receiver-credentials": { tag: "AV_List", value: [] },
-          "utility.digitalasset.com/instrument-configuration": { tag: "AV_ContractId", value: $icCid }
-        }
-      }')
-  fi
-
-  TOKEN_ISSUER_BODY=$(jq -n \
-    --arg admin "$CBTC_NETWORK_PARTY" \
-    --arg tokenId "$CBTC_TOKEN_ID" \
-    --arg registrar "$CBTC_NETWORK_PARTY" \
-    --arg factoryContractId "$ALLOCATION_FACTORY_CID" \
-    --arg symbol "$CBTC_SYMBOL" \
-    --arg displayName "$CBTC_DISPLAY_NAME" \
-    --arg priceSourceId "$CBTC_PRICE_SOURCE_ID" \
-    --argjson discloseContracts "$DISCLOSE_CONTRACTS" \
-    --argjson choiceContextData "$CHOICE_CONTEXT_DATA" \
-    '{
-      admin: $admin,
-      tokenId: $tokenId,
-      registrar: $registrar,
-      factoryContractId: $factoryContractId,
-      symbol: $symbol,
-      displayName: $displayName,
-      priceSourceId: $priceSourceId,
-      metadata: null,
-      discloseContracts: $discloseContracts,
-      choiceContextData: $choiceContextData
-    }')
-
-  ISSUER_REG_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/token-issuer" \
-    -H "Authorization: Bearer $BACKEND_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$TOKEN_ISSUER_BODY" 2>&1) || true
-
-  ISSUER_HTTP_CODE=$(echo "$ISSUER_REG_RESULT" | tail -n1 | tr -d '\r')
-  ISSUER_REG_BODY=$(echo "$ISSUER_REG_RESULT" | sed '$d')
-
-  case "$ISSUER_HTTP_CODE" in
-    200|201)
-      log "  Token issuer registered successfully!"
-      log "  Token ID: $CBTC_TOKEN_ID"
-      log "  Admin: $CBTC_NETWORK_PARTY"
-      log "  Factory: $ALLOCATION_FACTORY_CID"
-      ;;
-    409)
-      log "  Token issuer already registered (tokenId '$CBTC_TOKEN_ID' exists)."
-      ;;
-    *)
-      log_error "Token issuer registration failed with HTTP $ISSUER_HTTP_CODE"
-      log_error "Response: $ISSUER_REG_BODY"
-      exit 1
-      ;;
-  esac
+  docker exec -i -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
+    psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q < "$UPSERT_SQL_FILE"
 fi
+
+rm -f "$UPSERT_SQL_FILE"
+
+log "  Token issuer upserted successfully!"
+log "  Token ID: $CBTC_TOKEN_ID"
+log "  Admin: $CBTC_NETWORK_PARTY"
+log "  Factory: $ALLOCATION_FACTORY_CID"
+log "  TransferRule: $TRANSFER_RULE_CID"
+
+##############################################################################
+# Update backend .env with CBTC party IDs
+##############################################################################
+
+log ""
+log "Updating backend .env with CBTC_NETWORK_PARTY_ID and REGISTRAR_PARTY_ID..."
+
+# Both registrar and CBTC-NETWORK are the same external party
+for key in CBTC_NETWORK_PARTY_ID REGISTRAR_PARTY_ID; do
+  if grep -q "^${key}=" "$BACKEND_ENV"; then
+    sed -i.bak "s|^${key}=.*|${key}=${CBTC_NETWORK_PARTY}|" "$BACKEND_ENV"
+  else
+    echo "${key}=${CBTC_NETWORK_PARTY}" >> "$BACKEND_ENV"
+  fi
+done
+log "  ${BACKEND_ENV} updated"
+log "  Restart the backend for the changes to take effect."
 
 ##############################################################################
 # Done
@@ -1223,5 +1316,5 @@ log "  AppRewardConfiguration CID: $APP_REWARD_CONFIG_CID"
 log "  Token issuer: $CBTC_TOKEN_ID ($CBTC_DISPLAY_NAME)"
 log ""
 log "Verify:"
-log "  curl -s $BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID -H 'Authorization: Bearer <token>' | jq"
+log "  curl -s $BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID | jq"
 log "  jq '.' $FACTORIES_FILE"

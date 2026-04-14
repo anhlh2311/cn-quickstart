@@ -16,7 +16,7 @@
 #   CBTC_TOTAL_AMOUNT   — Total CBTC to mint (default: 10000)
 #   CBTC_NUM_HOLDINGS   — Number of CBTC holdings to create (default: 10)
 #   AMULET_TOTAL_AMOUNT — Total Amulet to tap (default: 100000000)
-#   AMULET_NUM_HOLDINGS — Number of Amulet holdings to create (default: 100)
+#   AMULET_NUM_HOLDINGS — Number of Amulet holdings to create (default: 10)
 #
 # Usage:
 #   ./06-fund-liquidity-provider.sh
@@ -46,7 +46,7 @@ source "$SCRIPT_DIR/.env"
 CBTC_TOTAL_AMOUNT="${CBTC_TOTAL_AMOUNT:-10000}"
 CBTC_NUM_HOLDINGS="${CBTC_NUM_HOLDINGS:-10}"
 AMULET_TOTAL_AMOUNT="${AMULET_TOTAL_AMOUNT:-100000000}"
-AMULET_NUM_HOLDINGS="${AMULET_NUM_HOLDINGS:-100}"
+AMULET_NUM_HOLDINGS="${AMULET_NUM_HOLDINGS:-10}"
 
 # Load LP configuration from liquidity-provider.json
 LP_CONFIG_FILE="$SCRIPT_DIR/liquidity-provider.json"

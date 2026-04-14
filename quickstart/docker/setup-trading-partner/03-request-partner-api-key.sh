@@ -15,7 +15,7 @@
 #   - canton-exchange-backend running at BACKEND_URL
 #
 # Usage:
-#   ./02-request-partner-api-key.sh
+#   ./03-request-partner-api-key.sh
 
 set -eo pipefail
 
@@ -183,17 +183,21 @@ log "  Written: $OUTPUT_FILE"
 log ""
 log "Step 4: Writing $CONFIG_FILE..."
 
-# Read first trader from internal-parties.json if available
-INTERNAL_PARTIES_FILE="$INTERNAL_PARTIES_DIR/internal-parties.json"
+# Read first trader — prefer internal-trader.json (local), fall back to setup-internal-parties
 TRADER_PARTY_ID=""
 TRADER_USER_ID=""
-if [ -f "$INTERNAL_PARTIES_FILE" ]; then
-  TRADER_PARTY_ID=$(jq -r '.parties[0].partyId // empty' "$INTERNAL_PARTIES_FILE")
-  TRADER_USER_ID=$(jq -r '.parties[0].userId // empty' "$INTERNAL_PARTIES_FILE")
-  if [ -n "$TRADER_PARTY_ID" ]; then
-    log "  Detected trader: $TRADER_USER_ID"
+for _parties_file in \
+    "$SCRIPT_DIR/internal-trader.json" \
+    "$INTERNAL_PARTIES_DIR/internal-parties.json"; do
+  if [ -f "$_parties_file" ]; then
+    TRADER_PARTY_ID=$(jq -r '.parties[0].partyId // empty' "$_parties_file")
+    TRADER_USER_ID=$(jq -r '.parties[0].userId // empty' "$_parties_file")
+    if [ -n "$TRADER_PARTY_ID" ]; then
+      log "  Detected trader: $TRADER_USER_ID (from $(basename "$_parties_file"))"
+      break
+    fi
   fi
-fi
+done
 
 jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -212,7 +216,8 @@ jq -n \
     tradeRequest: {
       inputAmount: "10",
       inputTokenType: "Amulet",
-      outputTokenType: "CBTC"
+      outputTokenType: "CBTC",
+      expectedReceiverAmount: ""
     }
   }' > "$CONFIG_FILE"
 
@@ -234,7 +239,5 @@ log "  Output:          $OUTPUT_FILE"
 log "  Trade config:    $CONFIG_FILE"
 log ""
 log "Next steps:"
-log "  1. Ensure a trader has Amulet holdings:"
-log "     cd ../setup-internal-parties && ./04-faucet-amulet.sh"
-log "  2. Run the trade request test:"
+log "  1. Run the trade request test:"
 log "     ./test-trade-request.sh"

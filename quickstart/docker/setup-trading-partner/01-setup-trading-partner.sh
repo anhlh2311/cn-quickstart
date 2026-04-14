@@ -1,6 +1,6 @@
 #!/bin/bash
 # Setup script for trading-partner validator node on local quickstart network.
-# Uploads kairo-dex-simple-escrow-v3 and utility-related DAR files, resolves party IDs,
+# Uploads kairo-dex-simple-escrow-v5 and utility-related DAR files, resolves party IDs,
 # and outputs configuration needed for the trading-js-sdk.
 #
 # Prerequisites: quickstart must be running with trading-partner profile enabled
