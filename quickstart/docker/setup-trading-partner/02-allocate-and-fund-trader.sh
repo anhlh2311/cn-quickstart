@@ -47,11 +47,6 @@ source "$SCRIPT_DIR/.env"
 TRADING_PARTNER_JSON_API="${TRADING_PARTNER_JSON_API:-http://localhost:1975}"
 TRADING_PARTNER_VALIDATOR_API="${TRADING_PARTNER_VALIDATOR_API:-http://localhost:1903}"
 
-# Always shared-secret on the trading-partner node
-SHARED_SECRET="${SHARED_SECRET:-unsafe}"
-SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
-ADMIN_USER="${SHARED_SECRET_TRADING_PARTNER_USER:-ledger-api-user}"
-
 PARTY_HINT_PREFIX="${PARTY_HINT_PREFIX:-trader}"
 FAUCET_AMOUNT="${FAUCET_AMOUNT:-1000000}"
 POLL_TIMEOUT="${POLL_TIMEOUT:-300}"
@@ -61,25 +56,16 @@ OUTPUT_FILE="$SCRIPT_DIR/internal-trader.json"
 AMULET_RULES_TEMPLATE="#splice-amulet:Splice.AmuletRules:AmuletRules"
 PREAPPROVAL_PROPOSAL_TEMPLATE="#splice-wallet:Splice.Wallet.TransferPreapproval:TransferPreapprovalProposal"
 
+# Source shared auth helpers
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/auth.sh"
+
 ##############################################################################
 # Helper functions
 ##############################################################################
 
 log() { echo "[trader-setup] $*"; }
 log_error() { echo "[trader-setup] ERROR: $*" >&2; }
-
-generate_jwt() {
-  local sub="$1" aud="$2"
-  local now; now=$(date +%s)
-  local exp=$((now + 86400))
-  _b64url() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
-  local header; header=$(printf '{"alg":"HS256","typ":"JWT"}' | _b64url)
-  local payload; payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' \
-    "$sub" "$aud" "$now" "$exp" | _b64url)
-  local sig; sig=$(printf '%s.%s' "$header" "$payload" \
-    | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | _b64url)
-  echo "${header}.${payload}.${sig}"
-}
 
 curl_check() {
   local url=$1 token=$2 content_type=${3:-application/json}
@@ -115,9 +101,10 @@ log "  Party hint prefix: $PARTY_HINT_PREFIX"
 log "  Faucet amount:     $FAUCET_AMOUNT CC"
 log "  Participant:       $TRADING_PARTNER_JSON_API"
 log "  Validator:         $TRADING_PARTNER_VALIDATOR_API"
+log "  Auth mode:         ${AUTH_MODE:-shared-secret}"
 log ""
 
-ADMIN_TOKEN=$(generate_jwt "$ADMIN_USER" "$SHARED_SECRET_AUDIENCE")
+ADMIN_TOKEN=$(get_participant_token)
 
 VERSION=$(curl_check "$TRADING_PARTNER_JSON_API/v2/version" "" "application/json" 2>/dev/null \
   | jq -r '.version // empty') || VERSION=""
@@ -138,7 +125,7 @@ NAMESPACE="${PARTICIPANT_ID#participant::}"
 log "  Participant ID: $PARTICIPANT_ID"
 log "  Namespace: ${NAMESPACE:0:40}..."
 
-VALIDATOR_TOKEN=$(generate_jwt "$ADMIN_USER" "$SHARED_SECRET_AUDIENCE")
+VALIDATOR_TOKEN=$(get_validator_token)
 
 ##############################################################################
 # Step 1: Allocate party
@@ -275,7 +262,7 @@ if [ "$EXISTING_PA_HTTP" = "200" ] && \
     '.transfer_preapproval.contract_id // .transfer_preapproval.contract.contract_id')
   log "  TransferPreapproval already exists: ${PREAPPROVAL_CID:0:40}..."
 else
-  USER_TOKEN=$(generate_jwt "$USER_ID" "$SHARED_SECRET_AUDIENCE")
+  USER_TOKEN=$(get_user_token "$USER_ID")
   CMD_ID="transfer-preapproval-proposal-${PARTY_HINT}-${RUN_ID}"
 
   PROPOSAL_BODY=$(jq -n \
@@ -405,7 +392,7 @@ fi
 log "  AmuletRules CID: ${AMULET_RULES_CID:0:40}..."
 log "  OpenMiningRound CID: ${OPEN_ROUND_CID:0:40}..."
 
-USER_TOKEN=$(generate_jwt "$USER_ID" "$SHARED_SECRET_AUDIENCE")
+USER_TOKEN=$(get_user_token "$USER_ID")
 CMD_ID="faucet-amulet-${USER_ID}-${RUN_ID}"
 
 TAP_BODY=$(jq -n \

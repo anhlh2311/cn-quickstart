@@ -83,53 +83,48 @@ curl_check() {
   echo "$response_body"
 }
 
-# Generate a shared-secret JWT (HS256, secret="unsafe")
-generate_shared_secret_jwt() {
-  local sub="$1"
-  local aud="$2"
-  local now
-  now=$(date +%s)
-  local exp=$((now + 86400))
+# Source shared auth helpers (shared-secret + OAuth2)
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/auth.sh"
 
-  b64url() {
-    openssl enc -base64 -A | tr '+/' '-_' | tr -d '='
-  }
-
-  local header
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload
-  payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' "$sub" "$aud" "$now" "$exp" | b64url)
-  local signature
-  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | b64url)
-
-  echo "${header}.${payload}.${signature}"
-}
-
-# Detect auth mode from quickstart .env.local
+# Detect auth mode:
+#   1. Use AUTH_MODE from .env if explicitly set to "oauth2"
+#   2. Fall back to quickstart/.env.local (localnet convenience)
+#   3. Default to "shared-secret"
 detect_auth_mode() {
+  if [ "${AUTH_MODE:-}" = "oauth2" ]; then
+    log "AUTH_MODE=oauth2 (from .env)"
+    return
+  fi
   local env_local="$QUICKSTART_DIR/.env.local"
-  if [ ! -f "$env_local" ]; then
-    log_error "quickstart/.env.local not found. Run 'make setup' in quickstart/ first."
-    exit 1
+  if [ -f "$env_local" ]; then
+    local detected
+    detected=$(grep -E '^AUTH_MODE=' "$env_local" | cut -d= -f2 | tr -d '"' | tr -d "'" | head -1)
+    if [ -n "$detected" ]; then
+      AUTH_MODE="$detected"
+      log "Detected AUTH_MODE=$AUTH_MODE (from quickstart/.env.local)"
+      return
+    fi
   fi
-  AUTH_MODE=$(grep -E '^AUTH_MODE=' "$env_local" | cut -d= -f2 | tr -d '"' | tr -d "'")
-  if [ -z "$AUTH_MODE" ]; then
-    AUTH_MODE="shared-secret"
-  fi
-  log "Detected AUTH_MODE=$AUTH_MODE"
+  AUTH_MODE="${AUTH_MODE:-shared-secret}"
+  log "AUTH_MODE=$AUTH_MODE (default)"
 }
 
-# Get auth token for trading-partner (always uses shared-secret — no keycloak realm)
+# Obtain tokens for trading-partner and SV nodes.
+# The SV node is always accessed via shared-secret regardless of AUTH_MODE.
 get_tokens() {
-  log "Generating shared-secret JWT tokens..."
-  TRADING_PARTNER_TOKEN=$(generate_shared_secret_jwt "$SHARED_SECRET_TRADING_PARTNER_USER" "$SHARED_SECRET_AUDIENCE")
-  SV_TOKEN=$(generate_shared_secret_jwt "$SHARED_SECRET_SV_USER" "$SHARED_SECRET_AUDIENCE")
+  log "Obtaining auth tokens (AUTH_MODE=$AUTH_MODE)..."
+  TRADING_PARTNER_TOKEN=$(get_participant_token)
+  # SV is always shared-secret
+  SV_TOKEN=$(_generate_jwt "${SHARED_SECRET_SV_USER:-ledger-api-user}" \
+    "${SHARED_SECRET_AUDIENCE:-https://canton.network.global}" \
+    "${SHARED_SECRET:-unsafe}")
 
   if [ -z "$TRADING_PARTNER_TOKEN" ] || [ -z "$SV_TOKEN" ]; then
-    log_error "Failed to generate auth tokens"
+    log_error "Failed to obtain auth tokens"
     exit 1
   fi
-  log "Auth tokens generated successfully"
+  log "Auth tokens obtained"
 }
 
 # Resolve party ID from user
@@ -283,27 +278,38 @@ log "  SYNCHRONIZER_ID=$SYNCHRONIZER_ID"
 log ""
 log "Step 4: Writing trading-partner configuration..."
 
-cat > "$SCRIPT_DIR/trading-partner-config.json" <<EOF
-{
-  "tradingPartnerParty": "$TRADING_PARTNER_PARTY",
-  "dsoParty": "$DSO_PARTY",
-  "synchronizerId": "$SYNCHRONIZER_ID",
-  "ledgerApiUrl": "$TRADING_PARTNER_JSON_API",
-  "validatorApiUrl": "$TRADING_PARTNER_VALIDATOR_API",
-  "authMode": "share-secret",
-  "authConfig": {
-    "secret": "$SHARED_SECRET",
-    "audience": "$SHARED_SECRET_AUDIENCE",
-    "userId": "$SHARED_SECRET_TRADING_PARTNER_USER"
-  },
-  "ports": {
-    "ledgerApi": 1901,
-    "adminApi": 1902,
-    "jsonApi": 1975,
-    "validatorApi": 1903
-  }
-}
-EOF
+if [ "${AUTH_MODE:-shared-secret}" = "oauth2" ]; then
+  AUTH_CONFIG=$(jq -n \
+    --arg tokenUrl "${OAUTH2_TOKEN_URL:-}" \
+    --arg clientId "${OAUTH2_CLIENT_ID:-}" \
+    --arg audience "${OAUTH2_AUDIENCE:-}" \
+    '{tokenUrl: $tokenUrl, clientId: $clientId, audience: $audience}')
+else
+  AUTH_CONFIG=$(jq -n \
+    --arg secret "${SHARED_SECRET:-unsafe}" \
+    --arg audience "${SHARED_SECRET_AUDIENCE:-https://canton.network.global}" \
+    --arg userId "${SHARED_SECRET_TRADING_PARTNER_USER:-ledger-api-user}" \
+    '{secret: $secret, audience: $audience, userId: $userId}')
+fi
+
+jq -n \
+  --arg party "$TRADING_PARTNER_PARTY" \
+  --arg dso "$DSO_PARTY" \
+  --arg sync "$SYNCHRONIZER_ID" \
+  --arg ledgerApi "$TRADING_PARTNER_JSON_API" \
+  --arg validatorApi "$TRADING_PARTNER_VALIDATOR_API" \
+  --arg authMode "${AUTH_MODE:-shared-secret}" \
+  --argjson authConfig "$AUTH_CONFIG" \
+  '{
+    tradingPartnerParty: $party,
+    dsoParty: $dso,
+    synchronizerId: $sync,
+    ledgerApiUrl: $ledgerApi,
+    validatorApiUrl: $validatorApi,
+    authMode: $authMode,
+    authConfig: $authConfig,
+    ports: { ledgerApi: 1901, adminApi: 1902, jsonApi: 1975, validatorApi: 1903 }
+  }' > "$SCRIPT_DIR/trading-partner-config.json"
 log "  Written: $SCRIPT_DIR/trading-partner-config.json"
 
 log ""
@@ -325,9 +331,7 @@ log "    kairoApiUrl: 'http://localhost:3003',"
 log "    apiKey: '<partner-api-key>',"
 log "    ledgerApiUrl: '$TRADING_PARTNER_JSON_API',"
 log "    validatorApiUrl: '$TRADING_PARTNER_VALIDATOR_API',"
-log "    authMode: 'share-secret',"
-log "    authConfig: { secret: '$SHARED_SECRET', audience: '$SHARED_SECRET_AUDIENCE' },"
+log "    // authMode and authConfig — see trading-partner-config.json"
 log "    executorPartyId: '$TRADING_PARTNER_PARTY',"
 log "    synchronizerId: '$SYNCHRONIZER_ID',"
-log "    adminUser: '$SHARED_SECRET_TRADING_PARTNER_USER'"
 log "  });"

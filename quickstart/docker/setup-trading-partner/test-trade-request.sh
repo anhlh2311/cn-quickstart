@@ -145,6 +145,10 @@ TRADE_ESCROW_TEMPLATE="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeEscrow:Trad
 # Helper Functions
 ##############################################################################
 
+# Source shared auth helpers
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/auth.sh"
+
 log() { echo "[test] $*"; }
 log_error() { echo "[test] ERROR: $*" >&2; }
 
@@ -179,17 +183,6 @@ curl_check() {
     return 1
   fi
   echo "$body"
-}
-
-generate_canton_jwt() {
-  local sub="$1" aud="$2"
-  local now; now=$(date +%s)
-  local exp=$((now + 86400))
-  b64url() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
-  local header; header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload; payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' "$sub" "$aud" "$now" "$exp" | b64url)
-  local signature; signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | b64url)
-  echo "${header}.${payload}.${signature}"
 }
 
 query_active_contracts() {
@@ -237,12 +230,13 @@ get_blob_by_contract_id() {
 log "=========================================="
 log "Test: POST /trading-partner/trade-request"
 log "=========================================="
-log "  Trader:   $TRADER_PARTY_ID"
-log "  Executor: ${EXECUTOR_PARTY:0:50}..."
-log "  LP:       ${LP_PARTY:0:50}..."
-log "  DSO:      ${DSO_PARTY:0:50}..."
-log "  Input: $INPUT_AMOUNT $INPUT_TOKEN_TYPE → $OUTPUT_TOKEN_TYPE"
-log "  Backend: $BACKEND_URL"
+log "  Trader:    $TRADER_PARTY_ID"
+log "  Executor:  ${EXECUTOR_PARTY:0:50}..."
+log "  LP:        ${LP_PARTY:0:50}..."
+log "  DSO:       ${DSO_PARTY:0:50}..."
+log "  Input:     $INPUT_AMOUNT $INPUT_TOKEN_TYPE → $OUTPUT_TOKEN_TYPE"
+log "  Backend:   $BACKEND_URL"
+log "  Auth mode: ${AUTH_MODE:-shared-secret} (AP: ${AP_AUTH_MODE:-shared-secret})"
 log ""
 
 [ -n "$TRADER_PARTY_ID" ] || { log_error "TRADER_PARTY_ID not set"; exit 1; }
@@ -252,9 +246,9 @@ log ""
 [ -n "$DSO_PARTY" ] || { log_error "DSO_PARTY not set — ensure trading-partner-config.json exists (run 01-setup-trading-partner.sh)"; exit 1; }
 
 # Tokens for trading-partner node
-TP_TOKEN=$(generate_canton_jwt "${SHARED_SECRET_TRADING_PARTNER_USER:-ledger-api-user}" "$SHARED_SECRET_AUDIENCE")
+TP_TOKEN=$(get_participant_token)
 # Token for the trader user specifically
-TRADER_TOKEN=$(generate_canton_jwt "$TRADER_USER_ID" "$SHARED_SECRET_AUDIENCE")
+TRADER_TOKEN=$(get_user_token "$TRADER_USER_ID")
 
 SYNCHRONIZER_ID=$(curl_check "$TRADING_PARTNER_JSON_API/v2/state/connected-synchronizers" "$TP_TOKEN" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
@@ -467,7 +461,7 @@ confirm_step "Step 3 — $INPUT_TOKEN_TYPE holdings collected"
 log ""
 log "Step 3b: Checking for lingering TradeEscrow on app-provider node..."
 
-AP_TOKEN=$(generate_canton_jwt "ledger-api-user" "$SHARED_SECRET_AUDIENCE")
+AP_TOKEN=$(get_ap_token)
 
 ESCROW_RESPONSE=$(query_active_contracts "$APP_PROVIDER_JSON_API" "$AP_TOKEN" \
   "$LP_PARTY" "$TRADE_ESCROW_TEMPLATE" "false")

@@ -85,7 +85,11 @@ if [ -z "$EXECUTOR_PARTY_ID" ] && [ -n "$EXCHANGE_BACKEND_DIR" ]; then
   done
 fi
 
-APP_USER_USER_ID="${SHARED_SECRET_APP_USER_USER:-ledger-api-user}"
+APP_USER_USER_ID="${AP_SHARED_SECRET_USER:-${SHARED_SECRET_APP_USER_USER:-ledger-api-user}}"
+
+# Source shared auth helpers
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/auth.sh"
 
 ##############################################################################
 # Helper Functions
@@ -93,17 +97,6 @@ APP_USER_USER_ID="${SHARED_SECRET_APP_USER_USER:-ledger-api-user}"
 
 log() { echo "[withdraw] $*"; }
 log_error() { echo "[withdraw] ERROR: $*" >&2; }
-
-generate_canton_jwt() {
-  local sub="$1" aud="$2"
-  local now; now=$(date +%s)
-  local exp=$((now + 86400))
-  b64url() { openssl enc -base64 -A | tr '+/' '-_' | tr -d '='; }
-  local header; header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload; payload=$(printf '{"sub":"%s","aud":"%s","iat":%d,"exp":%d,"iss":"unsafe-auth"}' "$sub" "$aud" "$now" "$exp" | b64url)
-  local signature; signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$SHARED_SECRET" -binary | b64url)
-  echo "${header}.${payload}.${signature}"
-}
 
 curl_check() {
   local url=$1 token=$2 content_type=${3:-application/json}
@@ -186,9 +179,9 @@ log "  Executor: ${EXECUTOR_PARTY_ID:-(not set, skipping TradeProposal_Archive)}
 log "  Ledger:   $TRADING_PARTNER_JSON_API"
 log ""
 
-TRADER_TOKEN=$(generate_canton_jwt "$TRADER_USER_ID" "$SHARED_SECRET_AUDIENCE")
-TP_TOKEN=$(generate_canton_jwt "${SHARED_SECRET_TRADING_PARTNER_USER:-ledger-api-user}" "$SHARED_SECRET_AUDIENCE")
-APP_USER_TOKEN=$(generate_canton_jwt "$APP_USER_USER_ID" "$SHARED_SECRET_AUDIENCE")
+TRADER_TOKEN=$(get_user_token "$TRADER_USER_ID")
+TP_TOKEN=$(get_participant_token)
+APP_USER_TOKEN=$(get_ap_token)
 
 ##############################################################################
 # Step 0: Fetch OpenMiningRound via scan-proxy (needed for Amulet unlock)
