@@ -16,7 +16,7 @@
 #   - 01-setup-exchange.sh must have been run (DARs uploaded, contracts created)
 #   - canton-exchange-backend must be running (yarn start:dev)
 #
-# Usage: ./04-register-amulet-token.sh
+# Usage: BACKEND_ADMIN_PASSWORD=<password> ./04-register-amulet-token.sh
 
 set -eo pipefail
 
@@ -46,12 +46,9 @@ AMULET_DISPLAY_NAME=$(jq -r '.displayName' "$AMULET_CONFIG_FILE")
 AMULET_SYMBOL=$(jq -r '.symbol' "$AMULET_CONFIG_FILE")
 AMULET_PRICE_SOURCE_ID=$(jq -r '.priceSourceId' "$AMULET_CONFIG_FILE")
 
-# DB credentials from shared .env
-DB_HOST="$EXCHANGE_DB_HOST"
-DB_PORT="$EXCHANGE_DB_PORT"
-DB_USERNAME="$EXCHANGE_DB_USERNAME"
-DB_PASSWORD="$EXCHANGE_DB_PASSWORD"
-DB_NAME="$EXCHANGE_DB_NAME"
+# Backend admin credentials
+BACKEND_ADMIN_USERNAME="${BACKEND_ADMIN_USERNAME:-superadmin}"
+BACKEND_ADMIN_PASSWORD="${BACKEND_ADMIN_PASSWORD:?BACKEND_ADMIN_PASSWORD env var is required (e.g. BACKEND_ADMIN_PASSWORD=mypassword ./04-register-amulet-token.sh)}"
 
 ##############################################################################
 # Helper Functions
@@ -130,28 +127,6 @@ generate_canton_jwt() {
   echo "${header}.${payload}.${signature}"
 }
 
-# Generate a backend JWT for the setup user
-generate_backend_jwt() {
-  local user_id="$1"
-  local email="$2"
-  local now
-  now=$(date +%s)
-  local exp=$((now + 86400))
-
-  b64url() {
-    openssl enc -base64 -A | tr '+/' '-_' | tr -d '='
-  }
-
-  local header
-  header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
-  local payload
-  payload=$(printf '{"sub":"%s","email":"%s","iat":%d,"exp":%d}' "$user_id" "$email" "$now" "$exp" | b64url)
-  local signature
-  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -hmac "$BACKEND_JWT_SECRET" -binary | b64url)
-
-  echo "${header}.${payload}.${signature}"
-}
-
 # Resolve the DSO party ID from the validator API
 get_dso_party_id() {
   local token=$1
@@ -182,23 +157,28 @@ if ! curl -sf "$BACKEND_URL" > /dev/null 2>&1; then
 fi
 log "  Backend is running at $BACKEND_URL"
 
-# Generate Canton token for app-user participant
+# Generate Canton token for app-user participant (used to resolve DSO party)
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_APP_USER_USER" "$SHARED_SECRET_AUDIENCE")
 
-# Ensure setup user exists in backend DB and generate backend JWT
-log "  Ensuring setup user exists in database..."
-UPSERT_SQL="INSERT INTO users (id, email, username, password, first_name, last_name, is_active) VALUES ('$SETUP_USER_ID', '$SETUP_USER_EMAIL', '$SETUP_USER_NAME', 'setup-no-login', 'Setup', 'Script', true) ON CONFLICT (id) DO NOTHING;"
-
-if command -v psql > /dev/null 2>&1; then
-  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL" 2>/dev/null || \
-    docker exec -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-      psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL"
-else
-  docker exec -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-    psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q -c "$UPSERT_SQL"
+# Authenticate with backend as superadmin
+log "  Authenticating with backend as $BACKEND_ADMIN_USERNAME..."
+ADMIN_LOGIN_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\": \"$BACKEND_ADMIN_USERNAME\", \"password\": \"$BACKEND_ADMIN_PASSWORD\"}")
+ADMIN_HTTP_CODE=$(echo "$ADMIN_LOGIN_RESULT" | tail -n1 | tr -d '\r')
+ADMIN_LOGIN_BODY=$(echo "$ADMIN_LOGIN_RESULT" | sed '$d')
+if [ "$ADMIN_HTTP_CODE" -ne "200" ] && [ "$ADMIN_HTTP_CODE" -ne "201" ]; then
+  log_error "Admin login failed with HTTP $ADMIN_HTTP_CODE"
+  log_error "Response: $ADMIN_LOGIN_BODY"
+  exit 1
 fi
-
-BACKEND_TOKEN=$(generate_backend_jwt "$SETUP_USER_ID" "$SETUP_USER_EMAIL")
+ADMIN_TOKEN=$(echo "$ADMIN_LOGIN_BODY" | jq -r '.data.accessToken // .accessToken // empty')
+if [ -z "$ADMIN_TOKEN" ]; then
+  log_error "Failed to extract admin access token from login response"
+  log_error "Response: $ADMIN_LOGIN_BODY"
+  exit 1
+fi
+log "  Admin login successful."
 
 ##############################################################################
 # Step 1: Resolve DSO party ID
@@ -238,7 +218,7 @@ log "Step 2: Registering Amulet token issuer in backend..."
 
 # Check if already registered
 EXISTING_ISSUER=$(curl -sf "$BACKEND_URL/token-issuer/token/$AMULET_TOKEN_ID" \
-  -H "Authorization: Bearer $BACKEND_TOKEN" 2>/dev/null || echo "")
+  -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || echo "")
 
 if [ -n "$EXISTING_ISSUER" ] && echo "$EXISTING_ISSUER" | jq -e '.data.tokenId // .tokenId' > /dev/null 2>&1; then
   EXISTING_TOKEN_ID=$(echo "$EXISTING_ISSUER" | jq -r '.data.tokenId // .tokenId')
@@ -269,7 +249,7 @@ else
     }')
 
   ISSUER_REG_RESULT=$(curl -sf -w "\n%{http_code}" "$BACKEND_URL/token-issuer" \
-    -H "Authorization: Bearer $BACKEND_TOKEN" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$TOKEN_ISSUER_BODY" 2>&1) || true
 

@@ -21,7 +21,7 @@
 #   - canton-exchange-backend must be running (yarn start:dev)
 #   - Utility DARs must be uploaded (included in DAR_FILES in .env)
 #
-# Usage: ./03-register-cbtc-token.sh
+# Usage: BACKEND_ADMIN_PASSWORD=<password> ./03-register-cbtc-token.sh
 #
 # Note: The previous fungible-token version is preserved as 03-register-cbtc-token-using-fungible-token.sh
 
@@ -58,12 +58,9 @@ CBTC_PRICE_SOURCE_ID=$(jq -r '.priceSourceId' "$CBTC_CONFIG_FILE")
 # Alias for shared-secret user (uses the app-user participant)
 SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
 
-# DB credentials from shared .env
-DB_HOST="$EXCHANGE_DB_HOST"
-DB_PORT="$EXCHANGE_DB_PORT"
-DB_USERNAME="$EXCHANGE_DB_USERNAME"
-DB_PASSWORD="$EXCHANGE_DB_PASSWORD"
-DB_NAME="$EXCHANGE_DB_NAME"
+# Backend admin credentials
+BACKEND_ADMIN_USERNAME="${BACKEND_ADMIN_USERNAME:-superadmin}"
+BACKEND_ADMIN_PASSWORD="${BACKEND_ADMIN_PASSWORD:?BACKEND_ADMIN_PASSWORD env var is required (e.g. BACKEND_ADMIN_PASSWORD=mypassword ./03-register-cbtc-token.sh)}"
 
 # Template IDs for utility packages
 INSTRUMENT_CONFIG_TEMPLATE="#utility-registry-v0:Utility.Registry.V0.Configuration.Instrument:InstrumentConfiguration"
@@ -353,6 +350,26 @@ log "  Backend is running at $BACKEND_URL"
 
 # Generate Canton token for app-user participant (admin operations)
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
+
+# Authenticate with backend as superadmin
+log "  Authenticating with backend as $BACKEND_ADMIN_USERNAME..."
+ADMIN_LOGIN_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"username\": \"$BACKEND_ADMIN_USERNAME\", \"password\": \"$BACKEND_ADMIN_PASSWORD\"}")
+ADMIN_HTTP_CODE=$(echo "$ADMIN_LOGIN_RESULT" | tail -n1 | tr -d '\r')
+ADMIN_LOGIN_BODY=$(echo "$ADMIN_LOGIN_RESULT" | sed '$d')
+if [ "$ADMIN_HTTP_CODE" -ne "200" ] && [ "$ADMIN_HTTP_CODE" -ne "201" ]; then
+  log_error "Admin login failed with HTTP $ADMIN_HTTP_CODE"
+  log_error "Response: $ADMIN_LOGIN_BODY"
+  exit 1
+fi
+ADMIN_TOKEN=$(echo "$ADMIN_LOGIN_BODY" | jq -r '.data.accessToken // .accessToken // empty')
+if [ -z "$ADMIN_TOKEN" ]; then
+  log_error "Failed to extract admin access token from login response"
+  log_error "Response: $ADMIN_LOGIN_BODY"
+  exit 1
+fi
+log "  Admin login successful."
 
 ##############################################################################
 # Step 1: Generate / load Ed25519 keypair (idempotent)
@@ -1197,7 +1214,7 @@ log "  AppRewardConfiguration CID: ${APP_REWARD_CONFIG_CID:0:40}..."
 ##############################################################################
 
 log ""
-log "Step 8: Upserting CBTC token issuer into database..."
+log "Step 8: Registering CBTC token issuer in backend..."
 
 # Build the full discloseContracts and choiceContextData including TransferRule
 DISCLOSE_CONTRACTS=$(jq -n \
@@ -1220,59 +1237,69 @@ CHOICE_CONTEXT_DATA=$(jq -n \
     }
   }')
 
-# Write SQL to a temp file to safely handle JSONB data (avoids shell escaping issues)
-UPSERT_SQL_FILE=$(mktemp /tmp/cbtc-token-issuer-upsert.XXXXXX.sql)
+TOKEN_ISSUER_BODY=$(jq -n \
+  --arg admin "$CBTC_NETWORK_PARTY" \
+  --arg tokenId "$CBTC_TOKEN_ID" \
+  --arg registrar "$CBTC_NETWORK_PARTY" \
+  --arg factoryContractId "$ALLOCATION_FACTORY_CID" \
+  --arg symbol "$CBTC_SYMBOL" \
+  --arg displayName "$CBTC_DISPLAY_NAME" \
+  --arg priceSourceId "$CBTC_PRICE_SOURCE_ID" \
+  --argjson discloseContracts "$DISCLOSE_CONTRACTS" \
+  --argjson choiceContextData "$CHOICE_CONTEXT_DATA" \
+  '{
+    admin: $admin,
+    tokenId: $tokenId,
+    registrar: $registrar,
+    factoryContractId: $factoryContractId,
+    symbol: $symbol,
+    displayName: $displayName,
+    priceSourceId: (if $priceSourceId == "" then null else $priceSourceId end),
+    metadata: null,
+    discloseContracts: $discloseContracts,
+    choiceContextData: $choiceContextData
+  }')
 
-# Escape single quotes in JSON values for SQL (double them)
-_ESC_DISCLOSE=$(echo "$DISCLOSE_CONTRACTS" | sed "s/'/''/g")
-_ESC_CHOICE=$(echo "$CHOICE_CONTEXT_DATA" | sed "s/'/''/g")
-_ESC_ADMIN=$(echo "$CBTC_NETWORK_PARTY" | sed "s/'/''/g")
-_ESC_FACTORY=$(echo "$ALLOCATION_FACTORY_CID" | sed "s/'/''/g")
+# Check if already registered
+EXISTING_ISSUER=$(curl -sf "$BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null || echo "")
 
-cat > "$UPSERT_SQL_FILE" <<ENDSQL
-INSERT INTO token_issuers (
-  id, admin, token_id, registrar, factory_contract_id,
-  symbol, display_name, price_source_id, metadata,
-  disclose_contracts, choice_context_data, created_at, updated_at
-) VALUES (
-  gen_random_uuid(),
-  '${_ESC_ADMIN}',
-  '${CBTC_TOKEN_ID}',
-  '${_ESC_ADMIN}',
-  '${_ESC_FACTORY}',
-  '${CBTC_SYMBOL}',
-  '${CBTC_DISPLAY_NAME}',
-  '${CBTC_PRICE_SOURCE_ID}',
-  '{}'::jsonb,
-  '${_ESC_DISCLOSE}'::jsonb,
-  '${_ESC_CHOICE}'::jsonb,
-  NOW(),
-  NOW()
-)
-ON CONFLICT (token_id) DO UPDATE SET
-  admin               = EXCLUDED.admin,
-  registrar           = EXCLUDED.registrar,
-  factory_contract_id = EXCLUDED.factory_contract_id,
-  symbol              = EXCLUDED.symbol,
-  display_name        = EXCLUDED.display_name,
-  price_source_id     = EXCLUDED.price_source_id,
-  disclose_contracts  = EXCLUDED.disclose_contracts,
-  choice_context_data = EXCLUDED.choice_context_data,
-  updated_at          = NOW();
-ENDSQL
-
-if command -v psql > /dev/null 2>&1; then
-  PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_NAME" -q -f "$UPSERT_SQL_FILE" 2>/dev/null || \
-    docker exec -i -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-      psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q < "$UPSERT_SQL_FILE"
+if [ -n "$EXISTING_ISSUER" ] && echo "$EXISTING_ISSUER" | jq -e '.data.tokenId // .tokenId' > /dev/null 2>&1; then
+  log "  Token issuer already registered — updating with latest factory data..."
+  PATCH_RESULT=$(curl -s -w "\n%{http_code}" -X PATCH "$BACKEND_URL/token-issuer/token/$CBTC_TOKEN_ID" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$TOKEN_ISSUER_BODY" 2>&1) || true
+  PATCH_HTTP_CODE=$(echo "$PATCH_RESULT" | tail -n1 | tr -d '\r')
+  PATCH_BODY=$(echo "$PATCH_RESULT" | sed '$d')
+  if [ "$PATCH_HTTP_CODE" -ne "200" ] && [ "$PATCH_HTTP_CODE" -ne "201" ] && [ "$PATCH_HTTP_CODE" -ne "204" ]; then
+    log_error "Token issuer PATCH failed with HTTP $PATCH_HTTP_CODE"
+    log_error "Response: $PATCH_BODY"
+    exit 1
+  fi
+  log "  Token issuer updated successfully!"
 else
-  docker exec -i -e PGPASSWORD="$DB_PASSWORD" canton-exchange-postgres \
-    psql -h localhost -U "$DB_USERNAME" -d "$DB_NAME" -q < "$UPSERT_SQL_FILE"
+  REG_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/token-issuer" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$TOKEN_ISSUER_BODY" 2>&1) || true
+  REG_HTTP_CODE=$(echo "$REG_RESULT" | tail -n1 | tr -d '\r')
+  REG_BODY=$(echo "$REG_RESULT" | sed '$d')
+  case "$REG_HTTP_CODE" in
+    200|201)
+      log "  Token issuer registered successfully!"
+      ;;
+    409)
+      log "  Token issuer already registered (tokenId '$CBTC_TOKEN_ID' exists)."
+      ;;
+    *)
+      log_error "Token issuer registration failed with HTTP $REG_HTTP_CODE"
+      log_error "Response: $REG_BODY"
+      exit 1
+      ;;
+  esac
 fi
 
-rm -f "$UPSERT_SQL_FILE"
-
-log "  Token issuer upserted successfully!"
 log "  Token ID: $CBTC_TOKEN_ID"
 log "  Admin: $CBTC_NETWORK_PARTY"
 log "  Factory: $ALLOCATION_FACTORY_CID"

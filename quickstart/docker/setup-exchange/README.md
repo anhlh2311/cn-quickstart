@@ -32,10 +32,10 @@ yarn start:dev
 ./02-register-featured-app-right.sh
 
 # 5. Register CBTC token (external party + InstrumentConfiguration + AllocationFactory + token issuer)
-./03-register-cbtc-token.sh
+BACKEND_ADMIN_PASSWORD=<password> ./03-register-cbtc-token.sh
 
 # 6. Register Amulet token (DSO-managed, dynamic factory — just token issuer DB entry)
-./04-register-amulet-token.sh
+BACKEND_ADMIN_PASSWORD=<password> ./04-register-amulet-token.sh
 
 # 7. Setup Liquidity Provider on app-provider node
 BACKEND_ADMIN_PASSWORD=<password> ./05-setup-liquidity-provider.sh
@@ -103,7 +103,8 @@ Key variables:
 | `SV_JSON_API` | Super Validator participant JSON API | `http://localhost:4975` |
 | `DAR_FILES` | Comma-separated list of DAR filenames to upload | `kairo-dex-2.5.0.dar,...` |
 | `EXCHANGE_DB_*` | PostgreSQL credentials for the exchange backend DB | host, port, user, pass, name |
-| `BACKEND_JWT_SECRET` | JWT signing secret used by the exchange backend | From `jwt.config.ts` |
+| `BACKEND_ADMIN_USERNAME` | Superadmin username for the exchange backend (scripts 04, 05) | `superadmin` (default) |
+| `BACKEND_ADMIN_PASSWORD` | Superadmin password for the exchange backend (scripts 04, 05) | Required — set via inline env var |
 | `FEATURE_APP_RIGHT_TYPE` | Type string for the FeaturedAppRight registration | `angelhack` |
 
 ### `cbtc-config.json`
@@ -223,15 +224,16 @@ The utility `AllocationFactory` is a single contract that implements three inter
 
 ```bash
 # Requires: 01-setup-exchange.sh completed AND backend is running
-./03-register-cbtc-token.sh
+BACKEND_ADMIN_PASSWORD=<password> ./03-register-cbtc-token.sh
 ```
 
-**Prerequisites**: `01-setup-exchange.sh` has been run (including utility DARs uploaded). The exchange backend is running. `@canton-network/core-signing-lib` must be installed in the exchange backend (used for Ed25519 key generation and signing).
+**Prerequisites**: `01-setup-exchange.sh` has been run (including utility DARs uploaded). The exchange backend is running. `@canton-network/core-signing-lib` must be installed in the exchange backend (used for Ed25519 key generation and signing). `BACKEND_ADMIN_PASSWORD` must be provided.
 
 **Steps performed**:
 
 | Step | Action | Details |
 |------|--------|---------|
+| 0 | Admin login | Authenticates with the backend via `POST /admin/auth/login` using `BACKEND_ADMIN_USERNAME`/`BACKEND_ADMIN_PASSWORD`. Obtains an `accessToken` for subsequent API calls |
 | 1 | Generate Ed25519 keypair | Creates a NaCl keypair and computes the Canton fingerprint. Stored in `cbtc-network-keypair.json`. Skips if file exists |
 | 2 | Onboard external party | Uses the Canton JSON API v2 external party flow: `generate-topology` -> sign multiHash -> `allocate`. Skips if party already exists |
 | 3 | Create Canton user & grant rights | Creates a dedicated Canton user (`cbtc-network-user`) with `ActAs`/`ReadAs` rights for the external party. Also grants the admin user rights over the external party |
@@ -241,7 +243,7 @@ The utility `AllocationFactory` is a single contract that implements three inter
 | 5c | Create AppRewardConfiguration | Creates an `AppRewardConfiguration` contract (`utility-registry-v0`) via **submit-and-wait** signed by the executor party (APP_USER_PARTY). Defines the operator/provider app reward split (50/50 default). DSO party resolved from validator scan-proxy. Skips if contract exists |
 | 6 | Acquire disclosures | Re-queries all four contracts (AllocationFactory, InstrumentConfiguration, TransferRule, AppRewardConfiguration) with `includeCreatedEventBlob: true` to get disclosure blobs |
 | 7 | Write `cbtc-factories.json` | Stores all four contract IDs, template names, template IDs, and disclosures |
-| 8 | Register token issuer in backend | `POST /token-issuer` with admin party, token ID, registrar, factory contract ID, symbol, display name, price source, disclosed contracts, and choiceContextData |
+| 8 | Register token issuer in backend | `GET /token-issuer/token/CBTC` to check; `POST /token-issuer` if new; `PATCH /token-issuer/token/CBTC` if already registered (updates factory CID + disclosed contracts) |
 
 **Idempotency**: Every step checks for existing state before creating:
 
@@ -249,7 +251,7 @@ The utility `AllocationFactory` is a single contract that implements three inter
 - External party checked via `GET /v2/parties/party?parties=...`.
 - Canton user checked via `GET /v2/users/{userId}` (HTTP 200 = exists).
 - InstrumentConfiguration, AllocationFactory, TransferRule, and AppRewardConfiguration queried from active contracts before creating.
-- Backend registration checked via `GET /token-issuer/token/CBTC`.
+- Backend registration: existing issuers are updated via `PATCH` (re-running after new factory contracts always refreshes the stored data).
 
 ### Utility Package Contracts
 
@@ -325,18 +327,18 @@ The Amulet allocation factory is fetched **dynamically** from the validator's sc
 
 ```bash
 # Requires: 01-setup-exchange.sh completed AND backend is running
-./04-register-amulet-token.sh
+BACKEND_ADMIN_PASSWORD=<password> ./04-register-amulet-token.sh
 ```
 
-**Prerequisites**: `01-setup-exchange.sh` has been run. The exchange backend is running.
+**Prerequisites**: `01-setup-exchange.sh` has been run. The exchange backend is running. `BACKEND_ADMIN_PASSWORD` must be provided (either inline or set in the environment).
 
 **Steps performed**:
 
 | Step | Action | Details |
 |------|--------|---------|
+| 0 | Admin login | Authenticates with the backend via `POST /admin/auth/login` using `BACKEND_ADMIN_USERNAME`/`BACKEND_ADMIN_PASSWORD`. Obtains an `accessToken` for subsequent API calls |
 | 1 | Resolve DSO party | Reads DSO party from backend `.env`, or falls back to the validator API (`/v0/scan-proxy/dso-party-id`) |
-| 2 | Verify allocation factory | Calls `GET /allocation-factory/type/amulet` to verify the dynamic factory is accessible from the scan-proxy. Non-blocking if unavailable |
-| 3 | Register token issuer | `POST /token-issuer` with admin=DSO party, tokenId="Amulet", symbol="CC". `discloseContracts` and `choiceContextData` are empty (overridden at runtime with live data) |
+| 2 | Register token issuer | `POST /token-issuer` with admin=DSO party, tokenId="Amulet", symbol="CC". `discloseContracts` and `choiceContextData` are empty (overridden at runtime with live data) |
 
 **Idempotency**: The script checks if the Amulet token issuer already exists (`GET /token-issuer/token/Amulet`) before registering. Backend returns HTTP 409 if already registered, handled gracefully.
 
