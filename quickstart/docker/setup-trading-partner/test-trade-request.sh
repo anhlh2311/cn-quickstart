@@ -138,8 +138,9 @@ OUTPUT_TOKEN_TYPE="${OUTPUT_TOKEN_TYPE:-$([ -f "$TRADE_CONFIG_FILE" ] && jq -r '
 # Templates
 AMULET_HOLDING_TEMPLATE="#splice-amulet:Splice.Amulet:Amulet"
 CBTC_HOLDING_TEMPLATE="#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding"
-TRADE_PROPOSAL_FACTORY_TEMPLATE="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory"
-TRADE_ESCROW_TEMPLATE="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeEscrow:TradeEscrow"
+TRADE_PROPOSAL_FACTORY_TEMPLATE="${TRADE_PROPOSAL_FACTORY_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory}"
+TRADE_PROPOSAL_TEMPLATE="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
+TRADE_ESCROW_TEMPLATE="${TRADE_ESCROW_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeEscrow:TradeEscrow}"
 
 ##############################################################################
 # Helper Functions
@@ -612,7 +613,7 @@ log "Step 4: Create or reuse TradeProposal on trading-partner node..."
 # Check for a lingering TradeProposal from a previous failed run and reuse it
 log "  Checking for existing TradeProposal..."
 EXISTING_TP_RESPONSE=$(query_active_contracts "$TRADING_PARTNER_JSON_API" "$TP_TOKEN" \
-  "$TRADER_PARTY_ID" "#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposal:TradeProposal" "true")
+  "$TRADER_PARTY_ID" "$TRADE_PROPOSAL_TEMPLATE" "true")
 TRADE_PROPOSAL_CID=$(echo "$EXISTING_TP_RESPONSE" | jq -r '
   [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty
 ' 2>/dev/null || echo "")

@@ -28,7 +28,7 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
 
-TRADE_PROPOSAL_FACTORY_TEMPLATE="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory"
+TRADE_PROPOSAL_FACTORY_TEMPLATE="${TRADE_PROPOSAL_FACTORY_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory}"
 OUTPUT_FILE="$SCRIPT_DIR/trade-proposal-factory.json"
 
 ##############################################################################

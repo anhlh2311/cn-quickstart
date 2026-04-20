@@ -50,7 +50,7 @@ TRADING_PARTNER_JSON_API="${TRADING_PARTNER_JSON_API:-http://localhost:1975}"
 TRADING_PARTNER_VALIDATOR_API="${TRADING_PARTNER_VALIDATOR_API:-http://localhost:1903}"
 APP_USER_JSON_API="${APP_USER_JSON_API:-http://localhost:2975}"
 
-TRADE_PROPOSAL_TEMPLATE_ID="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposal:TradeProposal}"
+TRADE_PROPOSAL_TEMPLATE_ID="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
 
 # Load trader party from trade-request-config.json
 TRADE_CONFIG_FILE="$SCRIPT_DIR/trade-request-config.json"

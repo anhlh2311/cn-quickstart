@@ -627,7 +627,7 @@ FUNGIBLE_TOKEN_HOLDING_TEMPLATE_ID="#utility-registry-holding-v0:Utility.Registr
 AMULET_ALLOCATION_TEMPLATE_ID="#splice-amulet:Splice.AmuletAllocation:AmuletAllocation"
 LOCKED_AMULET_TEMPLATE_ID="#splice-amulet:Splice.Amulet:LockedAmulet"
 TRANSFER_FACTORY_TEMPLATE_ID="#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory"
-TRADE_PROPOSAL_TEMPLATE_ID="#kairo-dex-simple-escrow-v4:Kairo.Escrow.TradeProposal:TradeProposal"
+TRADE_PROPOSAL_TEMPLATE_ID="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
 LPENVEOF
 
     log "  Generated: $LP_BACKEND_DIR/.env.local"
