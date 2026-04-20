@@ -171,6 +171,10 @@ fi
 log ""
 log "Step 2: Creating Canton user and granting rights..."
 
+log "  Admin user: $ADMIN_USER"
+log "  Admin token: $ADMIN_TOKEN"
+log "  Party ID: $PARTY_ID"
+
 # Grant admin user ActAs/ReadAs over this party
 curl_check "$TRADING_PARTNER_JSON_API/v2/users/$ADMIN_USER/rights" "$ADMIN_TOKEN" "application/json" \
   --data-raw "$(jq -n \
@@ -227,6 +231,10 @@ log "  Rights granted for $USER_ID"
 
 log ""
 log "Step 3: Creating TransferPreapproval for $PARTY_HINT..."
+
+log "  Admin user: $ADMIN_USER"
+log "  Admin token: $ADMIN_TOKEN"
+log "  Validator token: $VALIDATOR_TOKEN"
 
 # Resolve provider party (primary party of admin user)
 PROVIDER_PARTY=$(curl_check "$TRADING_PARTNER_JSON_API/v2/users/$ADMIN_USER" "$ADMIN_TOKEN" "application/json" \

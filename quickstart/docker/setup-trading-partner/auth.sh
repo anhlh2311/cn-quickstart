@@ -10,6 +10,11 @@
 #   SHARED_SECRET_AUDIENCE — JWT audience (default: https://canton.network.global)
 #   SHARED_SECRET_TRADING_PARTNER_USER — Admin user sub claim (default: ledger-api-user)
 #
+# Exported variables (available to all scripts that source this file):
+#   ADMIN_USER             — Canton JSON API user ID for the admin token
+#                            (shared-secret: equals SHARED_SECRET_USER)
+#                            (oauth2: set OAUTH2_ADMIN_USER to override)
+#
 # For oauth2 (trading-partner node):
 #   OAUTH2_TOKEN_URL       — Token endpoint URL
 #   OAUTH2_CLIENT_ID       — Client ID
@@ -36,6 +41,11 @@
 
 # Normalise SHARED_SECRET_USER so functions below always have a consistent var
 SHARED_SECRET_USER="${SHARED_SECRET_USER:-${SHARED_SECRET_TRADING_PARTNER_USER:-ledger-api-user}}"
+
+# ADMIN_USER — Canton JSON API user ID corresponding to the admin token.
+# In shared-secret mode the JWT sub claim IS the Canton user ID, so this equals SHARED_SECRET_USER.
+# In OAuth2 mode the user ID may differ; set OAUTH2_ADMIN_USER if needed.
+ADMIN_USER="${ADMIN_USER:-${OAUTH2_ADMIN_USER:-$SHARED_SECRET_USER}}"
 
 # ---------------------------------------------------------------------------
 # Internal helpers
