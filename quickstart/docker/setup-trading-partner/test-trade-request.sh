@@ -50,9 +50,6 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
 fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
-# setup-exchange/.env provides EXCHANGE_BACKEND_DIR and fallback URLs; optional when trade-request-config.json is present
-# shellcheck disable=SC1091
-[ -f "$SETUP_EXCHANGE_DIR/.env" ] && source "$SETUP_EXCHANGE_DIR/.env"
 
 # trade-request-config.json is the preferred single source of truth for all resolved values.
 # Regenerate it by running: ./03-request-partner-api-key.sh [--config-only]
@@ -100,16 +97,9 @@ if [ -z "$PARTNER_API_KEY" ]; then
   [ -f "$LP_CONFIG" ] && PARTNER_API_KEY=$(jq -r '.apiKey // empty' "$LP_CONFIG" 2>/dev/null || echo "")
 fi
 
-# Executor and LP parties — prefer trade-request-config.json, fall back to backend .env / liquidity-provider.json
+# Executor and LP parties — prefer trade-request-config.json, fall back to liquidity-provider.json
 EXECUTOR_PARTY="${EXECUTOR_PARTY:-$(_cfg '.executorPartyId')}"
 LP_PARTY="${LP_PARTY:-$(_cfg '.lpPartyId')}"
-if [ -z "$EXECUTOR_PARTY" ] || [ -z "$LP_PARTY" ]; then
-  BACKEND_ENV="${EXCHANGE_BACKEND_DIR:+$EXCHANGE_BACKEND_DIR/.env}"
-  if [ -n "$BACKEND_ENV" ] && [ -f "$BACKEND_ENV" ]; then
-    [ -z "$EXECUTOR_PARTY" ] && EXECUTOR_PARTY=$(grep -E '^EXECUTOR_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
-    [ -z "$LP_PARTY" ] && LP_PARTY=$(grep -E '^LIQUIDITY_PROVIDER_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
-  fi
-fi
 if [ -z "$LP_PARTY" ]; then
   LP_JSON="$SETUP_EXCHANGE_DIR/liquidity-provider.json"
   [ -f "$LP_JSON" ] && LP_PARTY=$(jq -r '.liquidityProvider.lpPartyId // empty' "$LP_JSON" 2>/dev/null || echo "")
