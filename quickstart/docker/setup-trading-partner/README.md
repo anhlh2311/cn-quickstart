@@ -172,33 +172,47 @@ The `parties` array matches the shape of `setup-internal-parties/internal-partie
 
 ## Script 3: `03-request-partner-api-key.sh`
 
-Issues a partner API key from the canton-exchange-backend for use by the trading partner. Also writes a `trade-request-config.json` with default trade parameters that `test-trade-request.sh` reads.
+Issues a partner API key from the canton-exchange-backend for use by the trading partner. Writes `partner-api-key.json` and a fully expanded `trade-request-config.json` that serves as the single source of truth for `test-trade-request.sh` — aggregating all URLs, party IDs, template IDs, and trade parameters.
 
 ### Prerequisites
 
 - `01-setup-trading-partner.sh` completed (`trading-partner-config.json` exists)
 - Exchange backend running (`BACKEND_URL` configured in `setup-exchange/.env`)
 - Admin credentials set in `setup-exchange/.env`: `BACKEND_ADMIN_USERNAME` + `BACKEND_ADMIN_PASSWORD`
+  - _(not required when using `--config-only`)_
 
 ### Configuration
-
-The script sources both `.env` files:
 
 | Variable | Source | Default | Description |
 |----------|--------|---------|-------------|
 | `BACKEND_URL` | `setup-exchange/.env` | `http://localhost:3003` | Exchange backend URL |
 | `BACKEND_ADMIN_USERNAME` | `setup-exchange/.env` | `superadmin` | Backend admin username |
-| `BACKEND_ADMIN_PASSWORD` | `setup-exchange/.env` | _(required)_ | Backend admin password |
+| `BACKEND_ADMIN_PASSWORD` | `setup-exchange/.env` | _(required unless `--config-only`)_ | Backend admin password |
+| `TRADE_PROPOSAL_FACTORY_TEMPLATE_ID` | `.env` | v5 default | Override TradeProposalFactory template ID |
+| `TRADE_PROPOSAL_TEMPLATE_ID` | `.env` | v5 default | Override TradeProposal template ID |
+| `TRADE_ESCROW_TEMPLATE_ID` | `.env` | v5 default | Override TradeEscrow template ID |
 
 ### What It Does
 
 | Step | Action |
 |------|--------|
-| 1 | Reads `trading-partner-config.json` for the trading partner party ID |
-| 2 | Logs into the backend via `POST /admin/auth/login` |
-| 3 | Issues a new partner API key via `POST /admin/partner-api-keys` |
-| 4 | Writes `partner-api-key.json` with the raw key and metadata |
-| 5 | Writes `trade-request-config.json` with default trade parameters |
+| 1 | Reads `trading-partner-config.json` for the trading partner party ID, DSO party, synchronizer ID, and auth config |
+| 2 | Logs into the backend via `POST /admin/auth/login` _(skipped with `--config-only`)_ |
+| 3 | Issues a new partner API key via `POST /admin/partner-api-keys`; writes `partner-api-key.json` _(skipped with `--config-only`)_ |
+| 4 | Reads LP/executor parties from `liquidity-provider.json` + backend `.env`; reads CBTC network party from `cbtc-factories.json` |
+| 5 | Writes the expanded `trade-request-config.json` (single source of truth for `test-trade-request.sh`) |
+
+### Usage
+
+```bash
+# Normal: create a new partner API key and write config
+./03-request-partner-api-key.sh
+
+# Config-only: reuse the existing key, only refresh trade-request-config.json
+# (useful after re-running setup-exchange scripts that change party IDs or factory CIDs)
+./03-request-partner-api-key.sh --config-only
+SKIP_KEY_REQUEST=true ./03-request-partner-api-key.sh
+```
 
 ### Output
 
@@ -218,20 +232,37 @@ The script sources both `.env` files:
 }
 ```
 
-**`trade-request-config.json`**:
+**`trade-request-config.json`** — contains everything `test-trade-request.sh` needs:
 
 ```json
 {
   "generatedAt": "2026-04-10T00:00:00Z",
   "backendUrl": "http://localhost:3003",
+  "tradingPartnerJsonApi": "http://localhost:1975",
+  "tradingPartnerValidatorApi": "http://localhost:1903",
+  "appProviderJsonApi": "http://localhost:3975",
+  "appUserJsonApi": "http://localhost:2975",
   "partnerApiKey": "kex_...",
   "tradingPartnerParty": "trading_partner_quickstart-...",
   "traderPartyId": "trader-0::1220...",
   "traderUserId": "trader-0",
+  "dsoParty": "DSO::1220...",
+  "synchronizerId": "global-domain::1220...",
+  "executorPartyId": "app_user_quickstart-...",
+  "lpPartyId": "app_user_quickstart-...",
+  "cbtcNetworkParty": "cbtc-network::1220...",
+  "authMode": "shared-secret",
+  "authConfig": { "secret": "unsafe", "audience": "https://canton.network.global", "userId": "ledger-api-user" },
+  "templateIds": {
+    "tradeProposalFactory": "#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory",
+    "tradeProposal": "#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal",
+    "tradeEscrow": "#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeEscrow:TradeEscrow"
+  },
   "tradeRequest": {
     "inputAmount": "10",
     "inputTokenType": "Amulet",
-    "outputTokenType": "CBTC"
+    "outputTokenType": "CBTC",
+    "expectedReceiverAmount": ""
   }
 }
 ```
@@ -248,7 +279,7 @@ End-to-end test for `POST /trading-partner/trade-request`. Simulates the full pa
 
 - `01-setup-trading-partner.sh` completed
 - `02-allocate-and-fund-trader.sh` completed (`internal-trader.json` exists with funded trader)
-- `03-request-partner-api-key.sh` completed (`partner-api-key.json` and `trade-request-config.json` exist)
+- `03-request-partner-api-key.sh` completed (`trade-request-config.json` exists)
 - Exchange backend running and fully configured (scripts 01–07 in `setup-exchange/`)
 - Trader has sufficient input-token holdings on the trading-partner node:
   - Amulet: provided by `02-allocate-and-fund-trader.sh` (default 1,000,000 CC)
@@ -256,19 +287,29 @@ End-to-end test for `POST /trading-partner/trade-request`. Simulates the full pa
 
 ### Configuration
 
-Config is loaded automatically from `trade-request-config.json`. All values can be overridden via environment variables:
+All resolved values are loaded from `trade-request-config.json` (generated by `03-request-partner-api-key.sh`). Individual JSON files and `.env` files are used as fallbacks for backward compatibility. `setup-exchange/.env` is optional when `trade-request-config.json` is present. All values can be overridden via environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PARTNER_API_KEY` | from `partner-api-key.json` | `x-api-key` for the exchange backend partner API |
-| `TRADER_PARTY_ID` | from `internal-trader.json` | Fully qualified trader party ID |
-| `TRADER_USER_ID` | from `internal-trader.json` | Trader's Canton user ID |
-| `INPUT_AMOUNT` | `10` (from `trade-request-config.json`) | Amount of input token to swap |
-| `INPUT_TOKEN_TYPE` | `Amulet` | Input token (`Amulet` or `CBTC`) |
-| `OUTPUT_TOKEN_TYPE` | `CBTC` | Output token (`CBTC` or `Amulet`) |
-| `TRADING_PARTNER_JSON_API` | `http://localhost:1975` | Trading-partner node JSON API URL |
-| `APP_PROVIDER_JSON_API` | `http://localhost:3975` | App-provider (exchange) node JSON API URL — queried for lingering `TradeEscrow` contracts |
-| `SKIP_ESCROW_SETTLE` | _(unset)_ | Set to `true` to skip settling lingering `TradeEscrow` contracts in step 3b |
+| Variable | Primary source | Fallback | Description |
+|----------|---------------|----------|-------------|
+| `PARTNER_API_KEY` | `trade-request-config.json` | `partner-api-key.json`, `liquidity-provider.json` | `x-api-key` for the exchange backend partner API |
+| `TRADER_PARTY_ID` | `trade-request-config.json` | `internal-trader.json` | Fully qualified trader party ID |
+| `TRADER_USER_ID` | `trade-request-config.json` | `internal-trader.json` | Trader's Canton user ID |
+| `INPUT_AMOUNT` | `trade-request-config.json` | `10` | Amount of input token to swap |
+| `INPUT_TOKEN_TYPE` | `trade-request-config.json` | `Amulet` | Input token (`Amulet` or `CBTC`) |
+| `OUTPUT_TOKEN_TYPE` | `trade-request-config.json` | `CBTC` | Output token (`CBTC` or `Amulet`) |
+| `TRADING_PARTNER_JSON_API` | `trade-request-config.json` | `http://localhost:1975` | Trading-partner node JSON API URL |
+| `APP_PROVIDER_JSON_API` | `trade-request-config.json` | `http://localhost:3975` | App-provider (exchange) node JSON API URL — queried for lingering `TradeEscrow` contracts |
+| `EXECUTOR_PARTY` | `trade-request-config.json` | backend `.env` | Exchange executor party ID |
+| `LP_PARTY` | `trade-request-config.json` | `liquidity-provider.json`, backend `.env` | Liquidity provider party ID |
+| `DSO_PARTY` | `trade-request-config.json` | `trading-partner-config.json` | DSO party ID |
+| `CBTC_NETWORK_PARTY` | `trade-request-config.json` | `cbtc-factories.json` | CBTC network (registrar) party ID |
+| `SKIP_ESCROW_SETTLE` | _(env var only)_ | _(unset)_ | Set to `true` to skip settling lingering `TradeEscrow` contracts in step 3b |
+
+To refresh `trade-request-config.json` without creating a new API key (e.g., after re-running exchange setup scripts):
+
+```bash
+./03-request-partner-api-key.sh --config-only
+```
 
 ### What It Does
 

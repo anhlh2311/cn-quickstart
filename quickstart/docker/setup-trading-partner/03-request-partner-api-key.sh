@@ -6,7 +6,8 @@
 #   2. Logs into the exchange backend as admin
 #   3. Issues a new partner API key via POST /admin/partner-api-keys
 #   4. Writes the key to partner-api-key.json
-#   5. Writes a trade-request-config.json with default trade request parameters
+#   5. Writes trade-request-config.json — a single config file for test-trade-request.sh
+#      containing all resolved runtime values (URLs, parties, template IDs, trade params)
 #
 # Prerequisites:
 #   - setup-trading-partner/.env configured (BACKEND_ADMIN_USERNAME, BACKEND_ADMIN_PASSWORD)
@@ -15,7 +16,9 @@
 #   - canton-exchange-backend running at BACKEND_URL
 #
 # Usage:
-#   ./03-request-partner-api-key.sh
+#   ./03-request-partner-api-key.sh               # create new key + write config
+#   ./03-request-partner-api-key.sh --config-only  # skip key creation, refresh config only
+#   SKIP_KEY_REQUEST=true ./03-request-partner-api-key.sh
 
 set -eo pipefail
 
@@ -50,17 +53,59 @@ fi
 
 TRADING_PARTNER_PARTY=$(jq -r '.tradingPartnerParty' "$TP_CONFIG")
 
+# --config-only (or SKIP_KEY_REQUEST=true): skip admin login + key creation,
+# only refresh trade-request-config.json using the existing key from partner-api-key.json.
+SKIP_KEY_REQUEST="${SKIP_KEY_REQUEST:-false}"
+for _arg in "$@"; do
+  case "$_arg" in --config-only) SKIP_KEY_REQUEST=true ;; esac
+done
+
 # Backend config (from setup-exchange/.env)
 BACKEND_URL="${BACKEND_URL:-http://localhost:3003}"
 BACKEND_ADMIN_USERNAME="${BACKEND_ADMIN_USERNAME:-superadmin}"
 
-if [ -z "$BACKEND_ADMIN_PASSWORD" ]; then
+if [ "$SKIP_KEY_REQUEST" != "true" ] && [ -z "$BACKEND_ADMIN_PASSWORD" ]; then
   echo "[partner-api-key] ERROR: BACKEND_ADMIN_PASSWORD not set. Add it to $SETUP_EXCHANGE_DIR/.env." >&2
   exit 1
 fi
 
 OUTPUT_FILE="$SCRIPT_DIR/partner-api-key.json"
 CONFIG_FILE="$SCRIPT_DIR/trade-request-config.json"
+
+# Additional data sources for the expanded trade-request-config.json
+TRADING_PARTNER_JSON_API=$(jq -r '.ledgerApiUrl // empty' "$TP_CONFIG")
+TRADING_PARTNER_VALIDATOR_API=$(jq -r '.validatorApiUrl // empty' "$TP_CONFIG")
+DSO_PARTY=$(jq -r '.dsoParty // empty' "$TP_CONFIG")
+SYNCHRONIZER_ID=$(jq -r '.synchronizerId // empty' "$TP_CONFIG")
+TP_AUTH_MODE=$(jq -r '.authMode // "shared-secret"' "$TP_CONFIG")
+TP_AUTH_CONFIG=$(jq -c '.authConfig // {}' "$TP_CONFIG")
+
+# LP + executor parties — read from liquidity-provider.json and backend .env
+EXECUTOR_PARTY=""
+LP_PARTY=""
+LP_JSON="$SETUP_EXCHANGE_DIR/liquidity-provider.json"
+if [ -f "$LP_JSON" ]; then
+  LP_PARTY=$(jq -r '.liquidityProvider.lpPartyId // empty' "$LP_JSON" 2>/dev/null || echo "")
+fi
+CBTC_FACTORIES_JSON="$SETUP_EXCHANGE_DIR/cbtc-factories.json"
+CBTC_NETWORK_PARTY=""
+if [ -f "$CBTC_FACTORIES_JSON" ]; then
+  CBTC_NETWORK_PARTY=$(jq -r '.cbtcNetworkParty // empty' "$CBTC_FACTORIES_JSON" 2>/dev/null || echo "")
+fi
+if [ -n "${EXCHANGE_BACKEND_DIR:-}" ]; then
+  _backend_env="$EXCHANGE_BACKEND_DIR/.env"
+  if [ -f "$_backend_env" ]; then
+    _exec=$(grep -E '^EXECUTOR_PARTY_ID=' "$_backend_env" | cut -d= -f2-)
+    _lp=$(grep -E '^LIQUIDITY_PROVIDER_PARTY_ID=' "$_backend_env" | cut -d= -f2-)
+    [ -n "$_exec" ] && EXECUTOR_PARTY="$_exec"
+    [ -n "$_lp" ] && LP_PARTY="$_lp"
+  fi
+fi
+
+# Template IDs (configurable via .env, with v5 defaults)
+_TRADE_PROPOSAL_FACTORY_TMPL="${TRADE_PROPOSAL_FACTORY_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory}"
+_TRADE_PROPOSAL_TMPL="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
+_TRADE_ESCROW_TMPL="${TRADE_ESCROW_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeEscrow:TradeEscrow}"
 
 ##############################################################################
 # Helper Functions
@@ -78,103 +123,134 @@ log "Request Partner API Key"
 log "=========================================="
 log "  Backend:         $BACKEND_URL"
 log "  Trading Partner: ${TRADING_PARTNER_PARTY:0:60}..."
+if [ "$SKIP_KEY_REQUEST" = "true" ]; then
+  log "  Mode:            config-only (reusing existing key)"
+fi
 log ""
 
-##############################################################################
-# Step 1: Admin login
-##############################################################################
+PARTNER_API_KEY=""
+KEY_ID=""
+KEY_PREFIX=""
+KEY_NAME=""
 
-log "Step 1: Logging in as admin ($BACKEND_ADMIN_USERNAME)..."
+if [ "$SKIP_KEY_REQUEST" = "true" ]; then
+  ##############################################################################
+  # Config-only mode: load existing key from partner-api-key.json
+  ##############################################################################
 
-LOGIN_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/auth/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\": \"$BACKEND_ADMIN_USERNAME\", \"password\": \"$BACKEND_ADMIN_PASSWORD\"}")
+  if [ ! -f "$OUTPUT_FILE" ]; then
+    log_error "--config-only requires an existing $OUTPUT_FILE"
+    log_error "Run without --config-only first to create the key."
+    exit 1
+  fi
+  PARTNER_API_KEY=$(jq -r '.partnerApiKey.rawKey // empty' "$OUTPUT_FILE")
+  KEY_ID=$(jq -r '.partnerApiKey.id // empty' "$OUTPUT_FILE")
+  KEY_PREFIX=$(jq -r '.partnerApiKey.prefix // empty' "$OUTPUT_FILE")
+  KEY_NAME=$(jq -r '.partnerApiKey.name // empty' "$OUTPUT_FILE")
+  if [ -z "$PARTNER_API_KEY" ]; then
+    log_error "Could not read partner API key from $OUTPUT_FILE"
+    exit 1
+  fi
+  log "Using existing key from $OUTPUT_FILE (ID: $KEY_ID)"
 
-LOGIN_HTTP=$(echo "$LOGIN_RESULT" | tail -n1 | tr -d '\r')
-LOGIN_BODY=$(echo "$LOGIN_RESULT" | sed '$d')
+else
+  ##############################################################################
+  # Step 1: Admin login
+  ##############################################################################
 
-if [ "$LOGIN_HTTP" -ne "200" ] && [ "$LOGIN_HTTP" -ne "201" ]; then
-  log_error "Admin login failed with HTTP $LOGIN_HTTP"
-  log_error "Response: $LOGIN_BODY"
-  exit 1
+  log "Step 1: Logging in as admin ($BACKEND_ADMIN_USERNAME)..."
+
+  LOGIN_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\": \"$BACKEND_ADMIN_USERNAME\", \"password\": \"$BACKEND_ADMIN_PASSWORD\"}")
+
+  LOGIN_HTTP=$(echo "$LOGIN_RESULT" | tail -n1 | tr -d '\r')
+  LOGIN_BODY=$(echo "$LOGIN_RESULT" | sed '$d')
+
+  if [ "$LOGIN_HTTP" -ne "200" ] && [ "$LOGIN_HTTP" -ne "201" ]; then
+    log_error "Admin login failed with HTTP $LOGIN_HTTP"
+    log_error "Response: $LOGIN_BODY"
+    exit 1
+  fi
+
+  ADMIN_TOKEN=$(echo "$LOGIN_BODY" | jq -r '.data.accessToken // .accessToken // empty')
+  ADMIN_ID=$(echo "$LOGIN_BODY" | jq -r '.data.admin.id // empty')
+
+  if [ -z "$ADMIN_TOKEN" ]; then
+    log_error "Failed to extract admin access token from login response"
+    exit 1
+  fi
+  log "  Admin login successful (ID: $ADMIN_ID)"
+
+  ##############################################################################
+  # Step 2: Issue partner API key
+  ##############################################################################
+
+  # Use the party hint (before ::) as a human-readable name suffix
+  TP_HINT="${TRADING_PARTNER_PARTY%%::*}"
+  KEY_NAME="Trading Partner - $TP_HINT"
+
+  log ""
+  log "Step 2: Issuing partner API key ('$KEY_NAME')..."
+
+  KEY_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/partner-api-keys" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -d "$(jq -n \
+      --arg adminId "$ADMIN_ID" \
+      --arg name "$KEY_NAME" \
+      '{adminId: $adminId, name: $name}')")
+
+  KEY_HTTP=$(echo "$KEY_RESULT" | tail -n1 | tr -d '\r')
+  KEY_BODY=$(echo "$KEY_RESULT" | sed '$d')
+
+  if [ "$KEY_HTTP" -ne "200" ] && [ "$KEY_HTTP" -ne "201" ]; then
+    log_error "Partner API key creation failed with HTTP $KEY_HTTP"
+    log_error "Response: $KEY_BODY"
+    exit 1
+  fi
+
+  PARTNER_API_KEY=$(echo "$KEY_BODY" | jq -r '.data.rawKey // .rawKey // empty')
+  KEY_ID=$(echo "$KEY_BODY" | jq -r '.data.id // .id // empty')
+  KEY_PREFIX=$(echo "$KEY_BODY" | jq -r '.data.prefix // .prefix // empty')
+
+  if [ -z "$PARTNER_API_KEY" ]; then
+    log_error "Failed to extract partner API key from response"
+    log_error "Response: $(echo "$KEY_BODY" | head -c 300)"
+    exit 1
+  fi
+  log "  Key issued: ${PARTNER_API_KEY:0:12}... (ID: $KEY_ID)"
+
+  ##############################################################################
+  # Step 3: Write partner-api-key.json
+  ##############################################################################
+
+  log ""
+  log "Step 3: Writing $OUTPUT_FILE..."
+
+  jq -n \
+    --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg keyId "$KEY_ID" \
+    --arg keyPrefix "$KEY_PREFIX" \
+    --arg keyName "$KEY_NAME" \
+    --arg rawKey "$PARTNER_API_KEY" \
+    --arg backendUrl "$BACKEND_URL" \
+    --arg tradingPartnerParty "$TRADING_PARTNER_PARTY" \
+    '{
+      generatedAt: $generatedAt,
+      backendUrl: $backendUrl,
+      tradingPartnerParty: $tradingPartnerParty,
+      partnerApiKey: {
+        id: $keyId,
+        prefix: $keyPrefix,
+        name: $keyName,
+        rawKey: $rawKey
+      }
+    }' > "$OUTPUT_FILE"
+
+  log "  Written: $OUTPUT_FILE"
+
 fi
-
-ADMIN_TOKEN=$(echo "$LOGIN_BODY" | jq -r '.data.accessToken // .accessToken // empty')
-ADMIN_ID=$(echo "$LOGIN_BODY" | jq -r '.data.admin.id // empty')
-
-if [ -z "$ADMIN_TOKEN" ]; then
-  log_error "Failed to extract admin access token from login response"
-  exit 1
-fi
-log "  Admin login successful (ID: $ADMIN_ID)"
-
-##############################################################################
-# Step 2: Issue partner API key
-##############################################################################
-
-# Use the party hint (before ::) as a human-readable name suffix
-TP_HINT="${TRADING_PARTNER_PARTY%%::*}"
-KEY_NAME="Trading Partner - $TP_HINT"
-
-log ""
-log "Step 2: Issuing partner API key ('$KEY_NAME')..."
-
-KEY_RESULT=$(curl -s -w "\n%{http_code}" "$BACKEND_URL/admin/partner-api-keys" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d "$(jq -n \
-    --arg adminId "$ADMIN_ID" \
-    --arg name "$KEY_NAME" \
-    '{adminId: $adminId, name: $name}')")
-
-KEY_HTTP=$(echo "$KEY_RESULT" | tail -n1 | tr -d '\r')
-KEY_BODY=$(echo "$KEY_RESULT" | sed '$d')
-
-if [ "$KEY_HTTP" -ne "200" ] && [ "$KEY_HTTP" -ne "201" ]; then
-  log_error "Partner API key creation failed with HTTP $KEY_HTTP"
-  log_error "Response: $KEY_BODY"
-  exit 1
-fi
-
-PARTNER_API_KEY=$(echo "$KEY_BODY" | jq -r '.data.rawKey // .rawKey // empty')
-KEY_ID=$(echo "$KEY_BODY" | jq -r '.data.id // .id // empty')
-KEY_PREFIX=$(echo "$KEY_BODY" | jq -r '.data.prefix // .prefix // empty')
-
-if [ -z "$PARTNER_API_KEY" ]; then
-  log_error "Failed to extract partner API key from response"
-  log_error "Response: $(echo "$KEY_BODY" | head -c 300)"
-  exit 1
-fi
-log "  Key issued: ${PARTNER_API_KEY:0:12}... (ID: $KEY_ID)"
-
-##############################################################################
-# Step 3: Write partner-api-key.json
-##############################################################################
-
-log ""
-log "Step 3: Writing $OUTPUT_FILE..."
-
-jq -n \
-  --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg keyId "$KEY_ID" \
-  --arg keyPrefix "$KEY_PREFIX" \
-  --arg keyName "$KEY_NAME" \
-  --arg rawKey "$PARTNER_API_KEY" \
-  --arg backendUrl "$BACKEND_URL" \
-  --arg tradingPartnerParty "$TRADING_PARTNER_PARTY" \
-  '{
-    generatedAt: $generatedAt,
-    backendUrl: $backendUrl,
-    tradingPartnerParty: $tradingPartnerParty,
-    partnerApiKey: {
-      id: $keyId,
-      prefix: $keyPrefix,
-      name: $keyName,
-      rawKey: $rawKey
-    }
-  }' > "$OUTPUT_FILE"
-
-log "  Written: $OUTPUT_FILE"
 
 ##############################################################################
 # Step 4: Write trade-request-config.json
@@ -201,18 +277,48 @@ done
 
 jq -n \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg partnerApiKey "$PARTNER_API_KEY" \
   --arg backendUrl "$BACKEND_URL" \
+  --arg tradingPartnerJsonApi "$TRADING_PARTNER_JSON_API" \
+  --arg tradingPartnerValidatorApi "$TRADING_PARTNER_VALIDATOR_API" \
+  --arg appProviderJsonApi "${APP_PROVIDER_JSON_API:-http://localhost:3975}" \
+  --arg appUserJsonApi "${APP_USER_JSON_API:-http://localhost:2975}" \
+  --arg partnerApiKey "$PARTNER_API_KEY" \
   --arg tradingPartnerParty "$TRADING_PARTNER_PARTY" \
   --arg traderPartyId "$TRADER_PARTY_ID" \
   --arg traderUserId "$TRADER_USER_ID" \
+  --arg dsoParty "$DSO_PARTY" \
+  --arg synchronizerId "$SYNCHRONIZER_ID" \
+  --arg executorPartyId "$EXECUTOR_PARTY" \
+  --arg lpPartyId "$LP_PARTY" \
+  --arg cbtcNetworkParty "$CBTC_NETWORK_PARTY" \
+  --arg authMode "$TP_AUTH_MODE" \
+  --argjson authConfig "$TP_AUTH_CONFIG" \
+  --arg tradeProposalFactoryTemplateId "$_TRADE_PROPOSAL_FACTORY_TMPL" \
+  --arg tradeProposalTemplateId "$_TRADE_PROPOSAL_TMPL" \
+  --arg tradeEscrowTemplateId "$_TRADE_ESCROW_TMPL" \
   '{
     generatedAt: $generatedAt,
     backendUrl: $backendUrl,
+    tradingPartnerJsonApi: $tradingPartnerJsonApi,
+    tradingPartnerValidatorApi: $tradingPartnerValidatorApi,
+    appProviderJsonApi: $appProviderJsonApi,
+    appUserJsonApi: $appUserJsonApi,
     partnerApiKey: $partnerApiKey,
     tradingPartnerParty: $tradingPartnerParty,
     traderPartyId: $traderPartyId,
     traderUserId: $traderUserId,
+    dsoParty: $dsoParty,
+    synchronizerId: $synchronizerId,
+    executorPartyId: $executorPartyId,
+    lpPartyId: $lpPartyId,
+    cbtcNetworkParty: $cbtcNetworkParty,
+    authMode: $authMode,
+    authConfig: $authConfig,
+    templateIds: {
+      tradeProposalFactory: $tradeProposalFactoryTemplateId,
+      tradeProposal: $tradeProposalTemplateId,
+      tradeEscrow: $tradeEscrowTemplateId
+    },
     tradeRequest: {
       inputAmount: "10",
       inputTokenType: "Amulet",
@@ -235,9 +341,13 @@ log ""
 log "Summary:"
 log "  Key ID:          $KEY_ID"
 log "  Key prefix:      ${PARTNER_API_KEY:0:12}..."
-log "  Output:          $OUTPUT_FILE"
+if [ "$SKIP_KEY_REQUEST" != "true" ]; then
+  log "  Output:          $OUTPUT_FILE"
+fi
 log "  Trade config:    $CONFIG_FILE"
 log ""
 log "Next steps:"
 log "  1. Run the trade request test:"
 log "     ./test-trade-request.sh"
+log "  2. To refresh config without creating a new key:"
+log "     ./03-request-partner-api-key.sh --config-only"

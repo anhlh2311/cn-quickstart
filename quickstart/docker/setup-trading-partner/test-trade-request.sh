@@ -48,22 +48,31 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
   echo "[test] ERROR: $SCRIPT_DIR/.env not found." >&2
   exit 1
 fi
-if [ ! -f "$SETUP_EXCHANGE_DIR/.env" ]; then
-  echo "[test] ERROR: $SETUP_EXCHANGE_DIR/.env not found. Run setup-exchange scripts first." >&2
-  exit 1
-fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.env"
+# setup-exchange/.env provides EXCHANGE_BACKEND_DIR and fallback URLs; optional when trade-request-config.json is present
 # shellcheck disable=SC1091
-source "$SETUP_EXCHANGE_DIR/.env"
+[ -f "$SETUP_EXCHANGE_DIR/.env" ] && source "$SETUP_EXCHANGE_DIR/.env"
 
-# Trading partner node (may be overridden by .env)
+# trade-request-config.json is the preferred single source of truth for all resolved values.
+# Regenerate it by running: ./03-request-partner-api-key.sh [--config-only]
+TRADE_CONFIG_FILE="$SCRIPT_DIR/trade-request-config.json"
+_cfg() { [ -f "$TRADE_CONFIG_FILE" ] && jq -r "${1} // empty" "$TRADE_CONFIG_FILE" 2>/dev/null || echo ""; }
+
+# URLs — prefer trade-request-config.json, fall back to .env / hardcoded defaults
+TRADING_PARTNER_JSON_API="${TRADING_PARTNER_JSON_API:-$(_cfg '.tradingPartnerJsonApi')}"
 TRADING_PARTNER_JSON_API="${TRADING_PARTNER_JSON_API:-http://localhost:1975}"
+TRADING_PARTNER_VALIDATOR_API="${TRADING_PARTNER_VALIDATOR_API:-$(_cfg '.tradingPartnerValidatorApi')}"
 TRADING_PARTNER_VALIDATOR_API="${TRADING_PARTNER_VALIDATOR_API:-http://localhost:1903}"
-# App provider (exchange) node
+APP_PROVIDER_JSON_API="${APP_PROVIDER_JSON_API:-$(_cfg '.appProviderJsonApi')}"
 APP_PROVIDER_JSON_API="${APP_PROVIDER_JSON_API:-http://localhost:3975}"
+BACKEND_URL="${BACKEND_URL:-$(_cfg '.backendUrl')}"
+BACKEND_URL="${BACKEND_URL:-http://localhost:3003}"
 
-# Load trader party — prefer internal-trader.json (local), fall back to setup-internal-parties
+# Trader party — prefer trade-request-config.json, fall back to individual JSON files
+if [ -z "$TRADER_PARTY_ID" ]; then
+  TRADER_PARTY_ID=$(_cfg '.traderPartyId')
+fi
 if [ -z "$TRADER_PARTY_ID" ]; then
   for _parties_file in \
       "$SCRIPT_DIR/internal-trader.json" \
@@ -75,72 +84,69 @@ if [ -z "$TRADER_PARTY_ID" ]; then
     fi
   done
 fi
+[ -z "$TRADER_USER_ID" ] && TRADER_USER_ID=$(_cfg '.traderUserId')
 TRADER_USER_ID="${TRADER_USER_ID:-trading-partner-0}"
 
-# Load partner API key — check partner-api-key.json first, then liquidity-provider.json
+# Partner API key — prefer trade-request-config.json, fall back to partner-api-key.json / liquidity-provider.json
+if [ -z "$PARTNER_API_KEY" ]; then
+  PARTNER_API_KEY=$(_cfg '.partnerApiKey')
+fi
 if [ -z "$PARTNER_API_KEY" ]; then
   PARTNER_KEY_FILE="$SCRIPT_DIR/partner-api-key.json"
-  if [ -f "$PARTNER_KEY_FILE" ]; then
-    PARTNER_API_KEY=$(jq -r '.partnerApiKey.rawKey // empty' "$PARTNER_KEY_FILE" 2>/dev/null || echo "")
-  fi
+  [ -f "$PARTNER_KEY_FILE" ] && PARTNER_API_KEY=$(jq -r '.partnerApiKey.rawKey // empty' "$PARTNER_KEY_FILE" 2>/dev/null || echo "")
 fi
 if [ -z "$PARTNER_API_KEY" ]; then
   LP_CONFIG="$SETUP_EXCHANGE_DIR/liquidity-provider.json"
-  if [ -f "$LP_CONFIG" ]; then
-    PARTNER_API_KEY=$(jq -r '.apiKey // empty' "$LP_CONFIG" 2>/dev/null || echo "")
+  [ -f "$LP_CONFIG" ] && PARTNER_API_KEY=$(jq -r '.apiKey // empty' "$LP_CONFIG" 2>/dev/null || echo "")
+fi
+
+# Executor and LP parties — prefer trade-request-config.json, fall back to backend .env / liquidity-provider.json
+EXECUTOR_PARTY="${EXECUTOR_PARTY:-$(_cfg '.executorPartyId')}"
+LP_PARTY="${LP_PARTY:-$(_cfg '.lpPartyId')}"
+if [ -z "$EXECUTOR_PARTY" ] || [ -z "$LP_PARTY" ]; then
+  BACKEND_ENV="${EXCHANGE_BACKEND_DIR:+$EXCHANGE_BACKEND_DIR/.env}"
+  if [ -n "$BACKEND_ENV" ] && [ -f "$BACKEND_ENV" ]; then
+    [ -z "$EXECUTOR_PARTY" ] && EXECUTOR_PARTY=$(grep -E '^EXECUTOR_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
+    [ -z "$LP_PARTY" ] && LP_PARTY=$(grep -E '^LIQUIDITY_PROVIDER_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
   fi
 fi
-
-# Load executor and LP parties from backend .env (EXCHANGE_BACKEND_DIR comes from setup-exchange/.env)
-BACKEND_ENV="$EXCHANGE_BACKEND_DIR/.env"
-EXECUTOR_PARTY=""
-LP_PARTY=""
-if [ -f "$BACKEND_ENV" ]; then
-  EXECUTOR_PARTY=$(grep -E '^EXECUTOR_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
-  LP_PARTY=$(grep -E '^LIQUIDITY_PROVIDER_PARTY_ID=' "$BACKEND_ENV" | cut -d= -f2-)
-fi
-
-# Fall back to liquidity-provider.json
 if [ -z "$LP_PARTY" ]; then
   LP_JSON="$SETUP_EXCHANGE_DIR/liquidity-provider.json"
-  if [ -f "$LP_JSON" ]; then
-    LP_PARTY=$(jq -r '.liquidityProvider.lpPartyId // empty' "$LP_JSON" 2>/dev/null || echo "")
-  fi
+  [ -f "$LP_JSON" ] && LP_PARTY=$(jq -r '.liquidityProvider.lpPartyId // empty' "$LP_JSON" 2>/dev/null || echo "")
 fi
 
-# Load DSO party from trading-partner-config.json (fully qualified ID needed for instrumentId.admin)
-TP_CONFIG="$SCRIPT_DIR/trading-partner-config.json"
-DSO_PARTY=""
-if [ -f "$TP_CONFIG" ]; then
-  DSO_PARTY=$(jq -r '.dsoParty // empty' "$TP_CONFIG" 2>/dev/null || echo "")
+# DSO party — prefer trade-request-config.json, fall back to trading-partner-config.json
+DSO_PARTY="${DSO_PARTY:-$(_cfg '.dsoParty')}"
+if [ -z "$DSO_PARTY" ]; then
+  TP_CONFIG="$SCRIPT_DIR/trading-partner-config.json"
+  [ -f "$TP_CONFIG" ] && DSO_PARTY=$(jq -r '.dsoParty // empty' "$TP_CONFIG" 2>/dev/null || echo "")
 fi
 
-# Load CBTC-NETWORK party from cbtc-factories.json if available.
-# If missing, it will be fetched from the exchange backend in Step 2.
-CBTC_FACTORIES_JSON="$SETUP_EXCHANGE_DIR/cbtc-factories.json"
-CBTC_NETWORK_PARTY=""
-if [ -f "$CBTC_FACTORIES_JSON" ]; then
-  CBTC_NETWORK_PARTY=$(jq -r '.cbtcNetworkParty // empty' "$CBTC_FACTORIES_JSON" 2>/dev/null || echo "")
+# CBTC network party — prefer trade-request-config.json, fall back to cbtc-factories.json
+# If still missing, it will be fetched from the exchange backend in Step 2.
+CBTC_NETWORK_PARTY="${CBTC_NETWORK_PARTY:-$(_cfg '.cbtcNetworkParty')}"
+if [ -z "$CBTC_NETWORK_PARTY" ]; then
+  CBTC_FACTORIES_JSON="$SETUP_EXCHANGE_DIR/cbtc-factories.json"
+  [ -f "$CBTC_FACTORIES_JSON" ] && CBTC_NETWORK_PARTY=$(jq -r '.cbtcNetworkParty // empty' "$CBTC_FACTORIES_JSON" 2>/dev/null || echo "")
 fi
 
-# Load trade config from trade-request-config.json if available
-TRADE_CONFIG_FILE="$SCRIPT_DIR/trade-request-config.json"
-if [ -f "$TRADE_CONFIG_FILE" ]; then
-  [ -z "$PARTNER_API_KEY" ] && PARTNER_API_KEY=$(jq -r '.partnerApiKey // empty' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "")
-  [ -z "$TRADER_PARTY_ID" ] && TRADER_PARTY_ID=$(jq -r '.traderPartyId // empty' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "")
-  [ -z "$TRADER_USER_ID" ] && TRADER_USER_ID=$(jq -r '.traderUserId // empty' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "")
-fi
+# Trade parameters — env var overrides, then config file, then defaults
+INPUT_AMOUNT="${INPUT_AMOUNT:-$(_cfg '.tradeRequest.inputAmount')}"
+INPUT_AMOUNT="${INPUT_AMOUNT:-10}"
+INPUT_TOKEN_TYPE="${INPUT_TOKEN_TYPE:-$(_cfg '.tradeRequest.inputTokenType')}"
+INPUT_TOKEN_TYPE="${INPUT_TOKEN_TYPE:-Amulet}"
+OUTPUT_TOKEN_TYPE="${OUTPUT_TOKEN_TYPE:-$(_cfg '.tradeRequest.outputTokenType')}"
+OUTPUT_TOKEN_TYPE="${OUTPUT_TOKEN_TYPE:-CBTC}"
 
-INPUT_AMOUNT="${INPUT_AMOUNT:-$([ -f "$TRADE_CONFIG_FILE" ] && jq -r '.tradeRequest.inputAmount // "10"' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "10")}"
-INPUT_TOKEN_TYPE="${INPUT_TOKEN_TYPE:-$([ -f "$TRADE_CONFIG_FILE" ] && jq -r '.tradeRequest.inputTokenType // "Amulet"' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "Amulet")}"
-OUTPUT_TOKEN_TYPE="${OUTPUT_TOKEN_TYPE:-$([ -f "$TRADE_CONFIG_FILE" ] && jq -r '.tradeRequest.outputTokenType // "CBTC"' "$TRADE_CONFIG_FILE" 2>/dev/null || echo "CBTC")}"
-
-# Templates
+# Templates — env var overrides, then config file, then v5 defaults
 AMULET_HOLDING_TEMPLATE="#splice-amulet:Splice.Amulet:Amulet"
 CBTC_HOLDING_TEMPLATE="#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding"
-TRADE_PROPOSAL_FACTORY_TEMPLATE="${TRADE_PROPOSAL_FACTORY_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory}"
-TRADE_PROPOSAL_TEMPLATE="${TRADE_PROPOSAL_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
-TRADE_ESCROW_TEMPLATE="${TRADE_ESCROW_TEMPLATE_ID:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeEscrow:TradeEscrow}"
+TRADE_PROPOSAL_FACTORY_TEMPLATE="${TRADE_PROPOSAL_FACTORY_TEMPLATE_ID:-$(_cfg '.templateIds.tradeProposalFactory')}"
+TRADE_PROPOSAL_FACTORY_TEMPLATE="${TRADE_PROPOSAL_FACTORY_TEMPLATE:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposalFactory:TradeProposalFactory}"
+TRADE_PROPOSAL_TEMPLATE="${TRADE_PROPOSAL_TEMPLATE_ID:-$(_cfg '.templateIds.tradeProposal')}"
+TRADE_PROPOSAL_TEMPLATE="${TRADE_PROPOSAL_TEMPLATE:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeProposal:TradeProposal}"
+TRADE_ESCROW_TEMPLATE="${TRADE_ESCROW_TEMPLATE_ID:-$(_cfg '.templateIds.tradeEscrow')}"
+TRADE_ESCROW_TEMPLATE="${TRADE_ESCROW_TEMPLATE:-#kairo-dex-simple-escrow-v5:Kairo.Escrow.TradeEscrow:TradeEscrow}"
 
 ##############################################################################
 # Helper Functions
