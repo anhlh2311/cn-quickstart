@@ -18,20 +18,23 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load shared configuration
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[query-cbtc] ERROR: $SETUP_DIR/.env not found." >&2
-  exit 1
+# Load configuration
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/.env"
 fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
 
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+SETUP_EXCHANGE_DIR="${SETUP_EXCHANGE_DIR:-$SCRIPT_DIR/../setup-exchange}"
+
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
 
 # Load CBTC config
-CBTC_CONFIG_FILE="$SETUP_DIR/cbtc-config.json"
+CBTC_CONFIG_FILE="$SETUP_EXCHANGE_DIR/cbtc-config.json"
 if [ ! -f "$CBTC_CONFIG_FILE" ]; then
   echo "[query-cbtc] ERROR: CBTC config not found: $CBTC_CONFIG_FILE" >&2
   exit 1
@@ -39,7 +42,7 @@ fi
 CBTC_TOKEN_ID=$(jq -r '.tokenId' "$CBTC_CONFIG_FILE")
 
 # Load CBTC-NETWORK keypair (for the network party ID)
-CBTC_KEYPAIR_FILE="$SETUP_DIR/cbtc-network-keypair.json"
+CBTC_KEYPAIR_FILE="$SETUP_EXCHANGE_DIR/cbtc-network-keypair.json"
 if [ ! -f "$CBTC_KEYPAIR_FILE" ]; then
   echo "[query-cbtc] ERROR: CBTC-NETWORK keypair not found: $CBTC_KEYPAIR_FILE" >&2
   exit 1
@@ -131,7 +134,7 @@ query_active_contracts() {
   local template_id="$2"
 
   local ledger_end
-  ledger_end=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
+  ledger_end=$(curl_check "$PARTICIPANT_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
 
   local query_body
   query_body=$(jq -n \
@@ -159,7 +162,7 @@ query_active_contracts() {
       activeAtOffset: $offset
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
     --data-raw "$query_body" 2>/dev/null || echo ""
 }
 

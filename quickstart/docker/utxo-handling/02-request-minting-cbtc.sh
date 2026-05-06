@@ -23,27 +23,29 @@ RUN_ID=$(date +%s%N 2>/dev/null || echo "$(date +%s)$$")
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load utxo-handling configuration
+# Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
+
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+SETUP_EXCHANGE_DIR="${SETUP_EXCHANGE_DIR:-$SCRIPT_DIR/../setup-exchange}"
 MINTS_PER_WALLET="${MINTS_PER_WALLET:-20}"
 MIN_AMOUNT="${MIN_AMOUNT:-100}"
 MAX_AMOUNT="${MAX_AMOUNT:-1000}"
 
-# Load shared configuration from setup-exchange .env
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[mint-cbtc] ERROR: $SETUP_DIR/.env not found. Run setup-exchange first." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+
+# Exchange backend (required for signing operations)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 
 # Load CBTC configuration
-CBTC_CONFIG_FILE="$SETUP_DIR/cbtc-config.json"
+CBTC_CONFIG_FILE="$SETUP_EXCHANGE_DIR/cbtc-config.json"
 if [ ! -f "$CBTC_CONFIG_FILE" ]; then
   echo "[mint-cbtc] ERROR: CBTC config not found: $CBTC_CONFIG_FILE" >&2
   echo "[mint-cbtc] Run 03-register-cbtc-token.sh first." >&2
@@ -52,7 +54,7 @@ fi
 CBTC_TOKEN_ID=$(jq -r '.tokenId' "$CBTC_CONFIG_FILE")
 
 # Load CBTC-NETWORK keypair
-CBTC_KEYPAIR_FILE="$SETUP_DIR/cbtc-network-keypair.json"
+CBTC_KEYPAIR_FILE="$SETUP_EXCHANGE_DIR/cbtc-network-keypair.json"
 if [ ! -f "$CBTC_KEYPAIR_FILE" ]; then
   echo "[mint-cbtc] ERROR: CBTC-NETWORK keypair not found: $CBTC_KEYPAIR_FILE" >&2
   echo "[mint-cbtc] Run 03-register-cbtc-token.sh first." >&2
@@ -68,7 +70,7 @@ if [ -z "$CBTC_NETWORK_PARTY" ] || [ "$CBTC_NETWORK_PARTY" = "null" ]; then
 fi
 
 # Load CBTC factories configuration (AllocationFactory + InstrumentConfiguration)
-FACTORIES_FILE="$SETUP_DIR/cbtc-factories.json"
+FACTORIES_FILE="$SETUP_EXCHANGE_DIR/cbtc-factories.json"
 if [ ! -f "$FACTORIES_FILE" ]; then
   echo "[mint-cbtc] ERROR: CBTC factories not found: $FACTORIES_FILE" >&2
   echo "[mint-cbtc] Run 03-register-cbtc-token.sh first." >&2
@@ -106,9 +108,6 @@ DISCLOSED_CONTRACTS=$(jq -c '[
 # Template IDs for utility packages
 ALLOCATION_FACTORY_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Service.AllocationFactory:AllocationFactory"
 MINT_REQUEST_TEMPLATE="#utility-registry-app-v0:Utility.Registry.App.V0.Model.Mint:MintRequest"
-
-# Alias for shared-secret user (uses the app-user participant)
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
 
 # Load user wallet keypairs
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
@@ -199,7 +198,7 @@ interactive_submit() {
   local fingerprint="$4"
   local cmd_id_prefix="$5"
   local disclosed_json="${6:-[]}"
-  local json_api="${7:-$APP_USER_JSON_API}"
+  local json_api="${7:-$PARTICIPANT_JSON_API}"
   local auth_token="${8:-$CANTON_TOKEN}"
   local user_id="${9:-$SHARED_SECRET_USER}"
 
@@ -350,7 +349,7 @@ CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENC
 CBTC_NETWORK_USER="cbtc-network-user"
 CANTON_CBTC_TOKEN=$(generate_canton_jwt "$CBTC_NETWORK_USER" "$SHARED_SECRET_AUDIENCE")
 
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
 if [ -z "$SYNCHRONIZER_ID" ]; then
@@ -488,7 +487,7 @@ for entry in "${MINT_REQUESTS[@]}"; do
     }]')
 
   TX_RESULT=$(interactive_submit "$CMD_JSON" "$CBTC_NETWORK_PARTY" "$CBTC_PRIV_KEY" "$CBTC_FP" \
-    "accept-mint-$ACCEPT_COUNT" "[]" "$APP_USER_JSON_API" "$CANTON_CBTC_TOKEN" "$CBTC_NETWORK_USER") || {
+    "accept-mint-$ACCEPT_COUNT" "[]" "$PARTICIPANT_JSON_API" "$CANTON_CBTC_TOKEN" "$CBTC_NETWORK_USER") || {
     log_error "Failed to accept mint request $MINT_CID"
     exit 1
   }

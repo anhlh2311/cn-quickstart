@@ -19,27 +19,33 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load utxo-handling configuration
+# Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
+
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+SETUP_EXCHANGE_DIR="${SETUP_EXCHANGE_DIR:-$SCRIPT_DIR/../setup-exchange}"
 TAPS_PER_WALLET="${TAPS_PER_WALLET:-20}"
 MIN_AMOUNT="${MIN_AMOUNT:-100}"
 MAX_AMOUNT="${MAX_AMOUNT:-1000}"
 
-# Load shared configuration from setup-exchange .env
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[faucet-amulet] ERROR: $SETUP_DIR/.env not found. Run setup-exchange first." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
 
-# Alias for shared-secret user (uses the app-user participant)
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+# SV participant (for fetching AmuletRules / OpenMiningRound)
+SV_JSON_API="${SV_JSON_API:-http://localhost:4975}"
+SHARED_SECRET_SV_USER="${SHARED_SECRET_SV_USER:-ledger-api-user}"
+
+# Participant validator API (for scan-proxy)
+PARTICIPANT_VALIDATOR_API="${PARTICIPANT_VALIDATOR_API:-http://localhost:2903}"
+
+# Exchange backend (required for signing operations)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 
 # Template IDs for Amulet/Splice contracts
 AMULET_RULES_TEMPLATE="#splice-amulet:Splice.AmuletRules:AmuletRules"
@@ -168,7 +174,7 @@ interactive_submit() {
 
     local prepare_http
     prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
-      "$APP_USER_JSON_API/v2/interactive-submission/prepare" \
+      "$PARTICIPANT_JSON_API/v2/interactive-submission/prepare" \
       -H "Authorization: Bearer $CANTON_TOKEN" \
       -H "Content-Type: application/json" \
       --data-raw "$prepare_body")
@@ -238,7 +244,7 @@ interactive_submit() {
 
     local execute_http
     execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
-      "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
+      "$PARTICIPANT_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
       -H "Authorization: Bearer $CANTON_TOKEN" \
       -H "Content-Type: application/json" \
       -d @"$tmp_execute_body")
@@ -322,7 +328,7 @@ log ""
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 SV_CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_SV_USER" "$SHARED_SECRET_AUDIENCE")
 
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
 if [ -z "$SYNCHRONIZER_ID" ]; then
@@ -332,7 +338,7 @@ fi
 log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
 
 # Resolve DSO party ID from validator scan-proxy
-DSO_PARTY=$(curl_check "$APP_USER_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
+DSO_PARTY=$(curl_check "$PARTICIPANT_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
   | jq -r '.dso_party_id // empty')
 
 if [ -z "$DSO_PARTY" ]; then

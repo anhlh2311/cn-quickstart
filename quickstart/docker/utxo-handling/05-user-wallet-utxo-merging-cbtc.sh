@@ -32,27 +32,27 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load shared configuration
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[utxo-merge-cbtc] ERROR: $SETUP_DIR/.env not found." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
-
-# Load local utxo-handling .env (overridable params)
+# Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
 
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+SETUP_EXCHANGE_DIR="${SETUP_EXCHANGE_DIR:-$SCRIPT_DIR/../setup-exchange}"
+
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+
+# Exchange backend (required for EXECUTOR_PARTY_ID)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 RUN_ID=$(date +%s%N 2>/dev/null || date +%s)
 
 # Load CBTC config
-CBTC_CONFIG_FILE="$SETUP_DIR/cbtc-config.json"
+CBTC_CONFIG_FILE="$SETUP_EXCHANGE_DIR/cbtc-config.json"
 if [ ! -f "$CBTC_CONFIG_FILE" ]; then
   echo "[utxo-merge-cbtc] ERROR: CBTC config not found: $CBTC_CONFIG_FILE" >&2
   exit 1
@@ -60,7 +60,7 @@ fi
 CBTC_TOKEN_ID=$(jq -r '.tokenId' "$CBTC_CONFIG_FILE")
 
 # Load CBTC-NETWORK keypair
-CBTC_KEYPAIR_FILE="$SETUP_DIR/cbtc-network-keypair.json"
+CBTC_KEYPAIR_FILE="$SETUP_EXCHANGE_DIR/cbtc-network-keypair.json"
 if [ ! -f "$CBTC_KEYPAIR_FILE" ]; then
   echo "[utxo-merge-cbtc] ERROR: CBTC-NETWORK keypair not found: $CBTC_KEYPAIR_FILE" >&2
   exit 1
@@ -98,7 +98,7 @@ if [ "$NUM_WALLETS" -gt "$AVAILABLE_WALLETS" ]; then
 fi
 
 # Load factory data from cbtc-factories.json
-FACTORIES_FILE="$SETUP_DIR/cbtc-factories.json"
+FACTORIES_FILE="$SETUP_EXCHANGE_DIR/cbtc-factories.json"
 if [ ! -f "$FACTORIES_FILE" ]; then
   echo "[utxo-merge-cbtc] ERROR: Factories file not found: $FACTORIES_FILE" >&2
   exit 1
@@ -134,7 +134,7 @@ DISCLOSED_CONTRACTS=$(jq -c '[
 ]' "$FACTORIES_FILE")
 
 # Load FeaturedAppRight from featured-app-right.json
-FAR_FILE="$SETUP_DIR/featured-app-right.json"
+FAR_FILE="$SETUP_EXCHANGE_DIR/featured-app-right.json"
 if [ ! -f "$FAR_FILE" ]; then
   echo "[utxo-merge-cbtc] ERROR: FeaturedAppRight file not found: $FAR_FILE" >&2
   echo "[utxo-merge-cbtc] Run 02-register-featured-app-right.sh first." >&2
@@ -258,7 +258,7 @@ regular_submit() {
       }
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
     --data-raw "$submit_body" || return 1
 }
 
@@ -269,7 +269,7 @@ query_active_contracts() {
   local include_blob="${3:-false}"
 
   local ledger_end
-  ledger_end=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
+  ledger_end=$(curl_check "$PARTICIPANT_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
 
   local query_body
   query_body=$(jq -n \
@@ -298,7 +298,7 @@ query_active_contracts() {
       activeAtOffset: $offset
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
     --data-raw "$query_body" 2>/dev/null || echo ""
 }
 

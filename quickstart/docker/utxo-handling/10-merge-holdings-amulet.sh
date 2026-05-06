@@ -25,23 +25,28 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load shared configuration
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[merge-amulet] ERROR: $SETUP_DIR/.env not found." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
-
-# Load local utxo-handling .env (overridable params)
+# Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
 
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+SETUP_EXCHANGE_DIR="${SETUP_EXCHANGE_DIR:-$SCRIPT_DIR/../setup-exchange}"
+
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+
+# SV participant (for fetching ExternalPartyAmuletRules, AmuletRules, OpenMiningRound)
+SV_JSON_API="${SV_JSON_API:-http://localhost:4975}"
+SHARED_SECRET_SV_USER="${SHARED_SECRET_SV_USER:-ledger-api-user}"
+PARTICIPANT_VALIDATOR_API="${PARTICIPANT_VALIDATOR_API:-http://localhost:2903}"
+
+# Exchange backend (required for EXECUTOR_PARTY_ID)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 RUN_ID=$(date +%s%N 2>/dev/null || date +%s)
 
 # Get OPERATOR_PARTY (executor) from backend .env
@@ -71,7 +76,7 @@ done
 NUM_WALLETS=$(jq '.wallets | length' "$KEYPAIRS_FILE")
 
 # Load FeaturedAppRight from featured-app-right.json
-FAR_FILE="$SETUP_DIR/featured-app-right.json"
+FAR_FILE="$SETUP_EXCHANGE_DIR/featured-app-right.json"
 if [ ! -f "$FAR_FILE" ]; then
   echo "[merge-amulet] ERROR: FeaturedAppRight file not found: $FAR_FILE" >&2
   echo "[merge-amulet] Run 02-register-featured-app-right.sh first." >&2
@@ -189,7 +194,7 @@ regular_submit() {
       }
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
     --data-raw "$submit_body" || return 1
 }
 
@@ -255,7 +260,7 @@ CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENC
 SV_CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_SV_USER" "$SHARED_SECRET_AUDIENCE")
 
 # Resolve DSO party ID
-DSO_PARTY=$(curl_check "$APP_USER_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
+DSO_PARTY=$(curl_check "$PARTICIPANT_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
   | jq -r '.dso_party_id // empty')
 
 if [ -z "$DSO_PARTY" ]; then
@@ -336,7 +341,7 @@ fi
 log "  OpenMiningRound: ${OR_CID:0:40}..."
 
 # Get synchronizer ID for disclosed contracts
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
 # Build disclosed contracts (ExternalPartyAmuletRules + AmuletRules + OpenMiningRound + FeaturedAppRight)
@@ -390,7 +395,7 @@ for i in $(seq 0 $((NUM_WALLETS - 1))); do
   log "  [$((i+1))/$NUM_WALLETS] $WALLET_NAME..."
 
   # 2a. Verify MergeDelegation exists
-  DELEG_RESPONSE=$(query_active_contracts_from "$APP_USER_JSON_API" "$CANTON_TOKEN" \
+  DELEG_RESPONSE=$(query_active_contracts_from "$PARTICIPANT_JSON_API" "$CANTON_TOKEN" \
     "$WALLET_PARTY" "$DELEGATION_TEMPLATE" "false")
   DELEG_CID=$(echo "$DELEG_RESPONSE" | jq -r '
     [.[] | select(.contractEntry.JsActiveContract) | .contractEntry.JsActiveContract.createdEvent.contractId][0] // empty

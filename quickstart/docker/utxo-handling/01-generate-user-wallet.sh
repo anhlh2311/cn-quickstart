@@ -10,19 +10,20 @@
 # to mint tokens for the user wallets.
 #
 # Environment variables:
-#   NUM_WALLETS       — Number of wallets to generate (default: 25)
-#   PARTY_HINT        — Party hint for all wallets (default: kairo)
-#   APPEND_WALLETS    — Set to "true" to append new wallets to existing keypairs
-#                       file instead of overwriting. New wallets get indices
-#                       continuing from the last existing wallet. (default: false)
-#   ONBOARD_ONLY      — Set to "true" to skip keypair generation and only run
-#                       onboarding (Step 2) and user creation (Step 3) from the
-#                       existing keypairs file. NUM_WALLETS and APPEND_WALLETS
-#                       are ignored. (default: false)
+#   PARTICIPANT_JSON_API — Canton JSON API URL (default: http://localhost:2975)
+#   NUM_WALLETS          — Number of wallets to generate (default: 25)
+#   PARTY_HINT           — Party hint for all wallets (default: kairo)
+#   APPEND_WALLETS       — Set to "true" to append new wallets to existing keypairs
+#                          file instead of overwriting. New wallets get indices
+#                          continuing from the last existing wallet. (default: false)
+#   ONBOARD_ONLY         — Set to "true" to skip keypair generation and only run
+#                          onboarding (Step 2) and user creation (Step 3) from the
+#                          existing keypairs file. NUM_WALLETS and APPEND_WALLETS
+#                          are ignored. (default: false)
+#   EXCHANGE_BACKEND_DIR — Path to canton-exchange-backend repo (required)
 #
 # Prerequisites:
 #   - quickstart must be running (cd quickstart && make start)
-#   - 01-setup-exchange.sh must have been run (DARs uploaded)
 #
 # Usage:
 #   ./01-generate-user-wallet.sh                          # Generate 25 wallets (overwrite)
@@ -37,13 +38,14 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load utxo-handling configuration
+# Load configuration
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
+
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
 NUM_WALLETS="${NUM_WALLETS:-25}"
 PARTY_HINT="${PARTY_HINT:-kairo}"
 # Set APPEND_WALLETS=true to add wallets to existing keypairs file instead of overwriting
@@ -52,16 +54,13 @@ APPEND_WALLETS="${APPEND_WALLETS:-false}"
 # from the existing keypairs file. NUM_WALLETS and APPEND_WALLETS are ignored.
 ONBOARD_ONLY="${ONBOARD_ONLY:-false}"
 
-# Load shared configuration from setup-exchange .env
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[user-wallet] ERROR: $SETUP_DIR/.env not found. Run setup-exchange first." >&2
-  exit 1
-fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
 
-# Alias for shared-secret user (uses the app-user participant)
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+# Exchange backend (required for keypair generation and signing)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 
 # Output files
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
@@ -175,7 +174,7 @@ interactive_submit() {
 
   local prepare_http
   prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
-    "$APP_USER_JSON_API/v2/interactive-submission/prepare" \
+    "$PARTICIPANT_JSON_API/v2/interactive-submission/prepare" \
     -H "Authorization: Bearer $CANTON_TOKEN" \
     -H "Content-Type: application/json" \
     --data-raw "$prepare_body")
@@ -240,7 +239,7 @@ interactive_submit() {
 
   local execute_http
   execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
-    "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
+    "$PARTICIPANT_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
     -H "Authorization: Bearer $CANTON_TOKEN" \
     -H "Content-Type: application/json" \
     -d @"$tmp_execute_body")
@@ -260,6 +259,11 @@ interactive_submit() {
 # Step 0: Pre-flight checks
 ##############################################################################
 
+if [ -z "$EXCHANGE_BACKEND_DIR" ]; then
+  log_error "EXCHANGE_BACKEND_DIR not set. Configure it in $SCRIPT_DIR/.env"
+  exit 1
+fi
+
 log "=========================================="
 log "Generate User Wallets"
 log "=========================================="
@@ -269,11 +273,12 @@ else
   log "  Wallets: $NUM_WALLETS"
   log "  Append mode: $APPEND_WALLETS"
 fi
+log "  Participant: $PARTICIPANT_JSON_API"
 log ""
 
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
 if [ -z "$SYNCHRONIZER_ID" ]; then
@@ -636,7 +641,7 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
   EXPECTED_PARTY="$PARTY_HINT_VALUE::$WALLET_FP"
 
   # Always verify the party exists on the participant (topology may be lost after restart)
-  PARTY_CHECK=$(curl_check "$APP_USER_JSON_API/v2/parties/party?parties=$EXPECTED_PARTY" "$CANTON_TOKEN" "application/json" \
+  PARTY_CHECK=$(curl_check "$PARTICIPANT_JSON_API/v2/parties/party?parties=$EXPECTED_PARTY" "$CANTON_TOKEN" "application/json" \
     | jq -r '.partyDetails[0].party // empty' 2>/dev/null || echo "")
 
   if [ -n "$PARTY_CHECK" ] && [ "$PARTY_CHECK" != "null" ]; then
@@ -661,7 +666,7 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
         localParticipantObservationOnly: false
       }')
 
-    TOPO_RESULT=$(curl_check "$APP_USER_JSON_API/v2/parties/external/generate-topology" "$CANTON_TOKEN" "application/json" \
+    TOPO_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/parties/external/generate-topology" "$CANTON_TOKEN" "application/json" \
       --data-raw "$TOPO_BODY") || {
       log_error "Failed to generate topology for $WALLET_NAME"
       exit 1
@@ -707,7 +712,7 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
         identityProviderId: ""
       }')
 
-    ALLOCATE_RESULT=$(curl_check "$APP_USER_JSON_API/v2/parties/external/allocate" "$CANTON_TOKEN" "application/json" \
+    ALLOCATE_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/parties/external/allocate" "$CANTON_TOKEN" "application/json" \
       --data-raw "$ALLOCATE_BODY") || {
       log_error "Failed to allocate external party $WALLET_NAME"
       exit 1
@@ -740,7 +745,7 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
   WALLET_USER=$(jq -r ".wallets[$i].userId" "$KEYPAIRS_FILE")
   WALLET_PARTY=$(jq -r ".wallets[$i].partyId" "$KEYPAIRS_FILE")
 
-  curl_check "$APP_USER_JSON_API/v2/users/$SHARED_SECRET_USER/rights" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/users/$SHARED_SECRET_USER/rights" "$CANTON_TOKEN" "application/json" \
     --data-raw '{
       "userId": "'"$SHARED_SECRET_USER"'",
       "identityProviderId": "",
@@ -750,10 +755,10 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
       ]
     }' > /dev/null 2>&1 || true
 
-  USER_STATUS=$(curl_status_code "$APP_USER_JSON_API/v2/users/$WALLET_USER" "$CANTON_TOKEN")
+  USER_STATUS=$(curl_status_code "$PARTICIPANT_JSON_API/v2/users/$WALLET_USER" "$CANTON_TOKEN")
 
   if [ "$USER_STATUS" != "200" ]; then
-    curl_check "$APP_USER_JSON_API/v2/users" "$CANTON_TOKEN" "application/json" \
+    curl_check "$PARTICIPANT_JSON_API/v2/users" "$CANTON_TOKEN" "application/json" \
       --data-raw '{
         "user": {
           "id": "'"$WALLET_USER"'",
@@ -771,7 +776,7 @@ for i in $(seq 0 $((TOTAL_WALLETS - 1))); do
       }' > /dev/null
   fi
 
-  curl_check "$APP_USER_JSON_API/v2/users/$WALLET_USER/rights" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/users/$WALLET_USER/rights" "$CANTON_TOKEN" "application/json" \
     --data-raw '{
       "userId": "'"$WALLET_USER"'",
       "identityProviderId": "",

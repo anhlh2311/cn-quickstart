@@ -21,17 +21,24 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load shared configuration
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[query-amulet] ERROR: $SETUP_DIR/.env not found." >&2
-  exit 1
+# Load configuration
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/.env"
 fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
 
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+
+# SV participant (for fetching AmuletRules / OpenMiningRound)
+SV_JSON_API="${SV_JSON_API:-http://localhost:4975}"
+SHARED_SECRET_SV_USER="${SHARED_SECRET_SV_USER:-ledger-api-user}"
+PARTICIPANT_VALIDATOR_API="${PARTICIPANT_VALIDATOR_API:-http://localhost:2903}"
 
 # User wallet keypairs
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
@@ -118,7 +125,7 @@ query_active_contracts() {
   local template_id="$2"
 
   local ledger_end
-  ledger_end=$(curl_check "$APP_USER_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
+  ledger_end=$(curl_check "$PARTICIPANT_JSON_API/v2/state/ledger-end" "$CANTON_TOKEN" "application/json" | jq -r '.offset')
 
   local query_body
   query_body=$(jq -n \
@@ -146,7 +153,7 @@ query_active_contracts() {
       activeAtOffset: $offset
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/state/active-contracts" "$CANTON_TOKEN" "application/json" \
     --data-raw "$query_body" 2>/dev/null || echo ""
 }
 
@@ -164,7 +171,7 @@ log ""
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 
 # Resolve DSO party ID
-DSO_PARTY=$(curl_check "$APP_USER_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
+DSO_PARTY=$(curl_check "$PARTICIPANT_VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$CANTON_TOKEN" "application/json" \
   | jq -r '.dso_party_id // empty')
 
 if [ -z "$DSO_PARTY" ]; then

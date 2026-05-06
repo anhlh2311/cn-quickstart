@@ -21,18 +21,22 @@ set -eo pipefail
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SETUP_DIR="$(cd "$SCRIPT_DIR/../setup-exchange" && pwd)"
 
-# Load shared configuration from setup-exchange .env
-if [ ! -f "$SETUP_DIR/.env" ]; then
-  echo "[merge-delegation] ERROR: $SETUP_DIR/.env not found. Run setup-exchange first." >&2
-  exit 1
+# Load configuration
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/.env"
 fi
-# shellcheck disable=SC1091
-source "$SETUP_DIR/.env"
 
-# Alias for shared-secret user (uses the app-user participant)
-SHARED_SECRET_USER="$SHARED_SECRET_APP_USER_USER"
+PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
+
+# Auth configuration
+SHARED_SECRET="${SHARED_SECRET:-unsafe}"
+SHARED_SECRET_AUDIENCE="${SHARED_SECRET_AUDIENCE:-https://canton.network.global}"
+SHARED_SECRET_USER="${SHARED_SECRET_USER:-ledger-api-user}"
+
+# Exchange backend (required for signing and EXECUTOR_PARTY_ID)
+EXCHANGE_BACKEND_DIR="${EXCHANGE_BACKEND_DIR:-}"
 
 # Load user wallet keypairs
 KEYPAIRS_FILE="$SCRIPT_DIR/user-wallet-keypairs.json"
@@ -166,7 +170,7 @@ interactive_submit() {
 
   local prepare_http
   prepare_http=$(curl -s -S -w "%{http_code}" -o "$tmp_prepare" \
-    "$APP_USER_JSON_API/v2/interactive-submission/prepare" \
+    "$PARTICIPANT_JSON_API/v2/interactive-submission/prepare" \
     -H "Authorization: Bearer $CANTON_TOKEN" \
     -H "Content-Type: application/json" \
     --data-raw "$prepare_body")
@@ -231,7 +235,7 @@ interactive_submit() {
 
   local execute_http
   execute_http=$(curl -s -S -w "%{http_code}" -o "$tmp_execute_resp" \
-    "$APP_USER_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
+    "$PARTICIPANT_JSON_API/v2/interactive-submission/executeAndWaitForTransaction" \
     -H "Authorization: Bearer $CANTON_TOKEN" \
     -H "Content-Type: application/json" \
     -d @"$tmp_execute_body")
@@ -276,7 +280,7 @@ regular_submit() {
       }
     }')
 
-  curl_check "$APP_USER_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
+  curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" "$CANTON_TOKEN" "application/json" \
     --data-raw "$submit_body" || return 1
 }
 
@@ -297,7 +301,7 @@ log ""
 CANTON_TOKEN=$(generate_canton_jwt "$SHARED_SECRET_USER" "$SHARED_SECRET_AUDIENCE")
 
 # Get connected synchronizer (needed for interactive submission)
-SYNCHRONIZER_ID=$(curl_check "$APP_USER_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
+SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$CANTON_TOKEN" "application/json" \
   | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 
 if [ -z "$SYNCHRONIZER_ID" ]; then
