@@ -80,6 +80,9 @@ APPEND_PARTIES=true NUM_PARTIES=5 ./01-allocate-internal-parties.sh
 # Re-onboard from existing file (skip allocation, just create Canton users)
 ONBOARD_ONLY=true ./01-allocate-internal-parties.sh
 
+# Use a custom parties file
+PARTIES_FILE=./internal-parties.mainnet.json ./01-allocate-internal-parties.sh
+
 # Use OAuth2 auth (override .env)
 AUTH_MODE=oauth2 ./01-allocate-internal-parties.sh
 ```
@@ -97,6 +100,7 @@ AUTH_MODE=oauth2 ./01-allocate-internal-parties.sh
 | `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `APPEND_PARTIES` | `false` | Append to existing output file instead of overwriting |
 | `ONBOARD_ONLY` | `false` | Skip allocation, only create Canton users from existing file |
+| `PARTIES_FILE` | `$SCRIPT_DIR/internal-parties.json` | Path to the output (and input for onboard-only) parties JSON file |
 
 ## What It Does
 
@@ -163,6 +167,12 @@ Creates a `TransferPreapproval` contract for each internal party. This enables o
 
 # With custom poll timeout (seconds per party, default: 60)
 POLL_TIMEOUT=120 ./02-create-transfer-preapprovals.sh
+
+# Use a custom parties file
+PARTIES_FILE=./internal-parties.mainnet.json ./02-create-transfer-preapprovals.sh
+
+# Use a custom output file
+OUTPUT_FILE=./transfer-preapprovals.mainnet.json ./02-create-transfer-preapprovals.sh
 ```
 
 ### Configuration
@@ -174,6 +184,8 @@ POLL_TIMEOUT=120 ./02-create-transfer-preapprovals.sh
 | `ADMIN_USER` | `ledger-api-user` | Canton admin user ID for resolving provider party |
 | `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `POLL_TIMEOUT` | `60` | Max seconds to wait for validator to accept each proposal |
+| `PARTIES_FILE` | `$SCRIPT_DIR/internal-parties.json` | Path to the input parties JSON file (output of script 01) |
+| `OUTPUT_FILE` | `$SCRIPT_DIR/transfer-preapprovals.json` | Path to the output preapprovals JSON file |
 
 ### Contract Details
 
@@ -241,6 +253,9 @@ A recipient can appear multiple times — each entry creates a separate Amulet h
 
 # Use a custom transfers file
 TRANSFERS_FILE=my-transfers.json ./03-distribute-amulet.sh
+
+# Use custom preapprovals file
+PREAPPROVALS_FILE=./transfer-preapprovals.mainnet.json ./03-distribute-amulet.sh
 ```
 
 ### Prerequisites
@@ -258,6 +273,7 @@ TRANSFERS_FILE=my-transfers.json ./03-distribute-amulet.sh
 | `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `TRANSFERS_FILE` | `./transfers.json` | Path to input JSON file |
 | `PREAPPROVALS_FILE` | `./transfer-preapprovals.json` | Path to preapprovals from script 02 |
+| `OUTPUT_FILE` | `$SCRIPT_DIR/distributed-amulet.json` | Path to the output distributed amulet JSON file |
 
 ### What It Does
 
@@ -344,6 +360,9 @@ The `recipient` field must be a fully-qualified party ID. The user ID is derived
 
 # Use a custom transfers file
 TRANSFERS_FILE=my-transfers.json ./04-faucet-amulet.sh
+
+# Use a custom parties file
+PARTIES_FILE=./internal-parties.mainnet.json ./04-faucet-amulet.sh
 ```
 
 ### Configuration
@@ -354,6 +373,8 @@ TRANSFERS_FILE=my-transfers.json ./04-faucet-amulet.sh
 | `VALIDATOR_API` | `http://localhost:1903` | Validator Admin API URL (for scan-proxy to fetch AmuletRules + OpenMiningRound) |
 | `AUTH_MODE` | `shared-secret` | Authentication mode: `shared-secret` or `oauth2` |
 | `TRANSFERS_FILE` | `./transfers.json` | Path to transfers input file |
+| `PARTIES_FILE` | `$SCRIPT_DIR/internal-parties.json` | Path to the parties JSON file (for resolving participant JSON API) |
+| `OUTPUT_FILE` | `$SCRIPT_DIR/fauceted-amulet.json` | Path to the output fauceted amulet JSON file |
 
 ### What It Does
 

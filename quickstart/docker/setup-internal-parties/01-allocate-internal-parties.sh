@@ -29,6 +29,7 @@
 #   NUM_PARTIES=5 PARTY_HINT_PREFIX=lp ./01-allocate-internal-parties.sh
 #   APPEND_PARTIES=true NUM_PARTIES=5 ./01-allocate-internal-parties.sh
 #   ONBOARD_ONLY=true ./01-allocate-internal-parties.sh
+#   PARTIES_FILE=./internal-parties.mainnet.json ./01-allocate-internal-parties.sh
 
 set -eo pipefail
 
@@ -38,24 +39,34 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Save caller-provided env vars before sourcing .env (CLI overrides take precedence)
+_cli_PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-}"
+_cli_NUM_PARTIES="${NUM_PARTIES:-}"
+_cli_PARTY_HINT_PREFIX="${PARTY_HINT_PREFIX:-}"
+_cli_APPEND_PARTIES="${APPEND_PARTIES:-}"
+_cli_ONBOARD_ONLY="${ONBOARD_ONLY:-}"
+_cli_AUTH_MODE="${AUTH_MODE:-}"
+_cli_PARTIES_FILE="${PARTIES_FILE:-}"
+
 # Load configuration from .env
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
 
-PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
-NUM_PARTIES="${NUM_PARTIES:-10}"
-PARTY_HINT_PREFIX="${PARTY_HINT_PREFIX:-trader}"
-APPEND_PARTIES="${APPEND_PARTIES:-false}"
-ONBOARD_ONLY="${ONBOARD_ONLY:-false}"
-AUTH_MODE="${AUTH_MODE:-shared-secret}"
+# CLI overrides > .env > defaults
+PARTICIPANT_JSON_API="${_cli_PARTICIPANT_JSON_API:-${PARTICIPANT_JSON_API:-http://localhost:2975}}"
+NUM_PARTIES="${_cli_NUM_PARTIES:-${NUM_PARTIES:-10}}"
+PARTY_HINT_PREFIX="${_cli_PARTY_HINT_PREFIX:-${PARTY_HINT_PREFIX:-trader}}"
+APPEND_PARTIES="${_cli_APPEND_PARTIES:-${APPEND_PARTIES:-false}}"
+ONBOARD_ONLY="${_cli_ONBOARD_ONLY:-${ONBOARD_ONLY:-false}}"
+AUTH_MODE="${_cli_AUTH_MODE:-${AUTH_MODE:-shared-secret}}"
 
 # Source shared auth helpers
 source "$SCRIPT_DIR/auth.sh"
 
 # Output file
-PARTIES_FILE="$SCRIPT_DIR/internal-parties.json"
+PARTIES_FILE="${_cli_PARTIES_FILE:-${PARTIES_FILE:-$SCRIPT_DIR/internal-parties.json}}"
 
 ##############################################################################
 # Helper Functions
@@ -219,16 +230,30 @@ for i in $(seq 0 $((NUM_PARTIES - 1))); do
   USER_ID="${PARTY_HINT}"
   DISPLAY_NAME="${PARTY_HINT_PREFIX} ${IDX}"
 
-  # Check if party already exists on the participant
-  EXISTING_PARTY=$(curl_check "$PARTICIPANT_JSON_API/v2/parties/party?parties=$EXPECTED_PARTY" "$TOKEN" "application/json" \
-    | jq -r '.partyDetails[0].party // empty' 2>/dev/null || echo "")
+  # Check if party already exists on the participant (use plain curl to avoid
+  # curl_check aborting on non-200 responses — the endpoint may return 404 for
+  # unknown parties, which is expected and not an error)
+  EXISTING_RESP=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$PARTICIPANT_JSON_API/v2/parties/party?parties=$EXPECTED_PARTY" 2>/dev/null || echo "")
+  EXISTING_HTTP=$(echo "$EXISTING_RESP" | tail -n1 | tr -d '\r')
+  EXISTING_BODY=$(echo "$EXISTING_RESP" | sed '$d')
+
+  EXISTING_PARTY=""
+  if [ "$EXISTING_HTTP" = "200" ]; then
+    EXISTING_PARTY=$(echo "$EXISTING_BODY" | jq -r '.partyDetails[0].party // empty' 2>/dev/null || echo "")
+  fi
 
   if [ -n "$EXISTING_PARTY" ] && [ "$EXISTING_PARTY" != "null" ]; then
     PARTY_ID="$EXISTING_PARTY"
     log "  [$((i+1))/$NUM_PARTIES] $PARTY_HINT already exists: ${PARTY_ID:0:50}..."
   else
     # Allocate the party on the participant
-    ALLOC_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/parties" "$TOKEN" "application/json" \
+    ALLOC_RESP=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      "$PARTICIPANT_JSON_API/v2/parties" \
       --data-raw "$(jq -n \
         --arg hint "$PARTY_HINT" \
         --arg name "$DISPLAY_NAME" \
@@ -236,19 +261,27 @@ for i in $(seq 0 $((NUM_PARTIES - 1))); do
           partyIdHint: $hint,
           displayName: $name,
           identityProviderId: ""
-        }')" ) || {
-      log_error "Failed to allocate party $PARTY_HINT"
-      exit 1
-    }
+        }')" 2>/dev/null || echo "")
+    ALLOC_HTTP=$(echo "$ALLOC_RESP" | tail -n1 | tr -d '\r')
+    ALLOC_BODY=$(echo "$ALLOC_RESP" | sed '$d')
 
-    PARTY_ID=$(echo "$ALLOC_RESULT" | jq -r '.partyDetails.party // empty')
-    if [ -z "$PARTY_ID" ]; then
-      log_error "Allocate succeeded but no partyId in response for $PARTY_HINT"
-      log_error "Response: $(echo "$ALLOC_RESULT" | head -c 300)"
+    if [ "$ALLOC_HTTP" = "200" ] || [ "$ALLOC_HTTP" = "201" ]; then
+      PARTY_ID=$(echo "$ALLOC_BODY" | jq -r '.partyDetails.party // empty')
+      if [ -z "$PARTY_ID" ]; then
+        log_error "Allocate succeeded but no partyId in response for $PARTY_HINT"
+        log_error "Response: $(echo "$ALLOC_BODY" | head -c 300)"
+        exit 1
+      fi
+      log "  [$((i+1))/$NUM_PARTIES] $PARTY_HINT allocated: ${PARTY_ID:0:50}..."
+    elif echo "$ALLOC_BODY" | grep -q "already exists" 2>/dev/null; then
+      # Party exists but wasn't found by the GET check — use the expected ID
+      PARTY_ID="$EXPECTED_PARTY"
+      log "  [$((i+1))/$NUM_PARTIES] $PARTY_HINT already exists: ${PARTY_ID:0:50}..."
+    else
+      log_error "Failed to allocate party $PARTY_HINT (HTTP $ALLOC_HTTP)"
+      log_error "Response: $(echo "$ALLOC_BODY" | head -c 500)"
       exit 1
     fi
-
-    log "  [$((i+1))/$NUM_PARTIES] $PARTY_HINT allocated: ${PARTY_ID:0:50}..."
   fi
 
   # Append to output file

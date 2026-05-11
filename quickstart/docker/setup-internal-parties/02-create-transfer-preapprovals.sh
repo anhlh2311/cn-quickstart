@@ -17,6 +17,8 @@
 #
 # Usage:
 #   ./02-create-transfer-preapprovals.sh
+#   PARTIES_FILE=./internal-parties.mainnet.json ./02-create-transfer-preapprovals.sh
+#   OUTPUT_FILE=./transfer-preapprovals.mainnet.json ./02-create-transfer-preapprovals.sh
 #   POLL_TIMEOUT=120 ./02-create-transfer-preapprovals.sh
 
 set -eo pipefail
@@ -27,23 +29,32 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Save caller-provided env vars before sourcing .env (CLI overrides take precedence)
+_cli_PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-}"
+_cli_VALIDATOR_API="${VALIDATOR_API:-}"
+_cli_AUTH_MODE="${AUTH_MODE:-}"
+_cli_POLL_TIMEOUT="${POLL_TIMEOUT:-}"
+_cli_PARTIES_FILE="${PARTIES_FILE:-}"
+_cli_OUTPUT_FILE="${OUTPUT_FILE:-}"
+
 # Load configuration from .env
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
 
-PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
-VALIDATOR_API="${VALIDATOR_API:-http://localhost:2903}"
-AUTH_MODE="${AUTH_MODE:-shared-secret}"
+# CLI overrides > .env > defaults
+PARTICIPANT_JSON_API="${_cli_PARTICIPANT_JSON_API:-${PARTICIPANT_JSON_API:-http://localhost:2975}}"
+VALIDATOR_API="${_cli_VALIDATOR_API:-${VALIDATOR_API:-http://localhost:2903}}"
+AUTH_MODE="${_cli_AUTH_MODE:-${AUTH_MODE:-shared-secret}}"
 # Max seconds to wait for validator to accept each proposal
-POLL_TIMEOUT="${POLL_TIMEOUT:-300}"
+POLL_TIMEOUT="${_cli_POLL_TIMEOUT:-${POLL_TIMEOUT:-300}}"
 
 # Source shared auth helpers
 source "$SCRIPT_DIR/auth.sh"
 
-PARTIES_FILE="$SCRIPT_DIR/internal-parties.json"
-OUTPUT_FILE="$SCRIPT_DIR/transfer-preapprovals.json"
+PARTIES_FILE="${_cli_PARTIES_FILE:-${PARTIES_FILE:-$SCRIPT_DIR/internal-parties.json}}"
+OUTPUT_FILE="${_cli_OUTPUT_FILE:-${OUTPUT_FILE:-$SCRIPT_DIR/transfer-preapprovals.json}}"
 
 ##############################################################################
 # Helper Functions
@@ -183,6 +194,25 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
     PREAPPROVAL_CID=$(echo "$EXISTING_BODY" | jq -r '.transfer_preapproval.contract_id // .transfer_preapproval.contract.contract_id')
     log "  [$((i+1))/$TOTAL_PARTIES] $PARTY_HINT: preapproval already exists: ${PREAPPROVAL_CID:0:40}..."
   else
+    # Ensure admin user has ActAs/ReadAs rights for this party (idempotent).
+    # In OAuth2 mode, get_user_token returns the admin token, so the admin user
+    # needs CanActAs to submit commands with actAs: [party].
+    curl -s -o /dev/null \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER/rights" \
+      --data-raw "$(jq -n \
+        --arg userId "$ADMIN_USER" \
+        --arg party "$PARTY_ID" \
+        '{
+          userId: $userId,
+          identityProviderId: "",
+          rights: [
+            {kind: {CanActAs: {value: {party: $party}}}},
+            {kind: {CanReadAs: {value: {party: $party}}}}
+          ]
+        }')" 2>/dev/null || true
+
     # Get a token to submit as the receiver party
     USER_TOKEN=$(get_user_token "$USER_ID")
 

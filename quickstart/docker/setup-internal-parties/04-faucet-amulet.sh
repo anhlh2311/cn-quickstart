@@ -22,6 +22,7 @@
 # Usage:
 #   ./04-faucet-amulet.sh
 #   TRANSFERS_FILE=my-transfers.json ./04-faucet-amulet.sh
+#   PARTIES_FILE=./internal-parties.mainnet.json ./04-faucet-amulet.sh
 
 set -eo pipefail
 
@@ -33,6 +34,14 @@ RUN_ID=$(date +%s%N 2>/dev/null || echo "$(date +%s)$$")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Save caller-provided env vars before sourcing .env (CLI overrides take precedence)
+_cli_PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-}"
+_cli_VALIDATOR_API="${VALIDATOR_API:-}"
+_cli_AUTH_MODE="${AUTH_MODE:-}"
+_cli_TRANSFERS_FILE="${TRANSFERS_FILE:-}"
+_cli_PARTIES_FILE="${PARTIES_FILE:-}"
+_cli_OUTPUT_FILE="${OUTPUT_FILE:-}"
+
 # Load configuration from .env
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
@@ -43,21 +52,22 @@ fi
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/auth.sh"
 
-PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:1975}"
-VALIDATOR_API="${VALIDATOR_API:-http://localhost:1903}"
+# CLI overrides > .env > defaults
+PARTICIPANT_JSON_API="${_cli_PARTICIPANT_JSON_API:-${PARTICIPANT_JSON_API:-http://localhost:1975}}"
+VALIDATOR_API="${_cli_VALIDATOR_API:-${VALIDATOR_API:-http://localhost:1903}}"
 
 # Read parties JSON API from internal-parties.json if available
-PARTIES_FILE="$SCRIPT_DIR/internal-parties.json"
-if [ -f "$PARTIES_FILE" ]; then
+PARTIES_FILE="${_cli_PARTIES_FILE:-${PARTIES_FILE:-$SCRIPT_DIR/internal-parties.json}}"
+if [ -z "$_cli_PARTICIPANT_JSON_API" ] && [ -f "$PARTIES_FILE" ]; then
   STORED_JSON_API=$(jq -r '.participantJsonApi // empty' "$PARTIES_FILE" 2>/dev/null || echo "")
   if [ -n "$STORED_JSON_API" ]; then
     PARTICIPANT_JSON_API="$STORED_JSON_API"
   fi
 fi
 
-TRANSFERS_FILE="${TRANSFERS_FILE:-$SCRIPT_DIR/transfers.json}"
+TRANSFERS_FILE="${_cli_TRANSFERS_FILE:-${TRANSFERS_FILE:-$SCRIPT_DIR/transfers.json}}"
 
-OUTPUT_FILE="$SCRIPT_DIR/fauceted-amulet.json"
+OUTPUT_FILE="${_cli_OUTPUT_FILE:-${OUTPUT_FILE:-$SCRIPT_DIR/fauceted-amulet.json}}"
 
 AMULET_RULES_TEMPLATE="#splice-amulet:Splice.AmuletRules:AmuletRules"
 

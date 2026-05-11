@@ -31,6 +31,7 @@
 # Usage:
 #   ./03-distribute-amulet.sh
 #   TRANSFERS_FILE=my-transfers.json ./03-distribute-amulet.sh
+#   PREAPPROVALS_FILE=./transfer-preapprovals.mainnet.json ./03-distribute-amulet.sh
 
 set -eo pipefail
 
@@ -40,21 +41,30 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Save caller-provided env vars before sourcing .env (CLI overrides take precedence)
+_cli_PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-}"
+_cli_VALIDATOR_API="${VALIDATOR_API:-}"
+_cli_AUTH_MODE="${AUTH_MODE:-}"
+_cli_TRANSFERS_FILE="${TRANSFERS_FILE:-}"
+_cli_PREAPPROVALS_FILE="${PREAPPROVALS_FILE:-}"
+_cli_OUTPUT_FILE="${OUTPUT_FILE:-}"
+
 if [ -f "$SCRIPT_DIR/.env" ]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/.env"
 fi
 
-PARTICIPANT_JSON_API="${PARTICIPANT_JSON_API:-http://localhost:2975}"
-VALIDATOR_API="${VALIDATOR_API:-http://localhost:2903}"
-AUTH_MODE="${AUTH_MODE:-shared-secret}"
-TRANSFERS_FILE="${TRANSFERS_FILE:-$SCRIPT_DIR/transfers.json}"
-PREAPPROVALS_FILE="${PREAPPROVALS_FILE:-$SCRIPT_DIR/transfer-preapprovals.json}"
+# CLI overrides > .env > defaults
+PARTICIPANT_JSON_API="${_cli_PARTICIPANT_JSON_API:-${PARTICIPANT_JSON_API:-http://localhost:2975}}"
+VALIDATOR_API="${_cli_VALIDATOR_API:-${VALIDATOR_API:-http://localhost:2903}}"
+AUTH_MODE="${_cli_AUTH_MODE:-${AUTH_MODE:-shared-secret}}"
+TRANSFERS_FILE="${_cli_TRANSFERS_FILE:-${TRANSFERS_FILE:-$SCRIPT_DIR/transfers.json}}"
+PREAPPROVALS_FILE="${_cli_PREAPPROVALS_FILE:-${PREAPPROVALS_FILE:-$SCRIPT_DIR/transfer-preapprovals.json}}"
 
 # Source shared auth helpers
 source "$SCRIPT_DIR/auth.sh"
 
-OUTPUT_FILE="$SCRIPT_DIR/distributed-amulet.json"
+OUTPUT_FILE="${_cli_OUTPUT_FILE:-${OUTPUT_FILE:-$SCRIPT_DIR/distributed-amulet.json}}"
 
 # Daml template IDs
 AMULET_TEMPLATE="#splice-amulet:Splice.Amulet:Amulet"
