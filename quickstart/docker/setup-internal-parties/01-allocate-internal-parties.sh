@@ -313,13 +313,18 @@ log ""
 log "Step 2: Creating Canton users and granting rights..."
 
 TOTAL_PARTIES=$(jq '.parties | length' "$PARTIES_FILE")
+STEP2_WARNINGS=0
 
 for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
   PARTY_USER=$(jq -r ".parties[$i].userId" "$PARTIES_FILE")
   PARTY_ID=$(jq -r ".parties[$i].partyId" "$PARTIES_FILE")
+  _party_ok=true
 
   # Grant admin user ActAs/ReadAs over this party
-  curl_check "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER/rights" "$TOKEN" "application/json" \
+  ADMIN_RIGHTS_RESP=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER/rights" \
     --data-raw "$(jq -n \
       --arg userId "$ADMIN_USER" \
       --arg party "$PARTY_ID" \
@@ -330,14 +335,24 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
           {kind: {CanActAs: {value: {party: $party}}}},
           {kind: {CanReadAs: {value: {party: $party}}}}
         ]
-      }')" > /dev/null 2>&1 || true
+      }')" 2>/dev/null || echo "")
+  ADMIN_RIGHTS_HTTP=$(echo "$ADMIN_RIGHTS_RESP" | tail -n1 | tr -d '\r')
+  if [ "$ADMIN_RIGHTS_HTTP" != "200" ] && [ "$ADMIN_RIGHTS_HTTP" != "201" ] && [ "$ADMIN_RIGHTS_HTTP" != "204" ]; then
+    ADMIN_RIGHTS_BODY=$(echo "$ADMIN_RIGHTS_RESP" | sed '$d')
+    log "  WARNING: Failed to grant admin ($ADMIN_USER) rights for $PARTY_USER (HTTP $ADMIN_RIGHTS_HTTP)"
+    log "    Response: $(echo "$ADMIN_RIGHTS_BODY" | head -c 200)"
+    _party_ok=false
+  fi
 
   # Check if user already exists
   USER_STATUS=$(curl_status_code "$PARTICIPANT_JSON_API/v2/users/$PARTY_USER" "$TOKEN")
 
   if [ "$USER_STATUS" != "200" ]; then
     # Create the user
-    curl_check "$PARTICIPANT_JSON_API/v2/users" "$TOKEN" "application/json" \
+    CREATE_RESP=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      "$PARTICIPANT_JSON_API/v2/users" \
       --data-raw "$(jq -n \
         --arg userId "$PARTY_USER" \
         --arg party "$PARTY_ID" \
@@ -353,11 +368,26 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
             }
           },
           rights: []
-        }')" > /dev/null
+        }')" 2>/dev/null || echo "")
+    CREATE_HTTP=$(echo "$CREATE_RESP" | tail -n1 | tr -d '\r')
+    CREATE_BODY=$(echo "$CREATE_RESP" | sed '$d')
+
+    if [ "$CREATE_HTTP" = "200" ] || [ "$CREATE_HTTP" = "201" ]; then
+      : # success
+    elif echo "$CREATE_BODY" | grep -q "already exists" 2>/dev/null; then
+      : # user already exists — not an error
+    else
+      log "  WARNING: Failed to create user $PARTY_USER (HTTP $CREATE_HTTP)"
+      log "    Response: $(echo "$CREATE_BODY" | head -c 200)"
+      _party_ok=false
+    fi
   fi
 
   # Grant user ActAs/ReadAs rights
-  curl_check "$PARTICIPANT_JSON_API/v2/users/$PARTY_USER/rights" "$TOKEN" "application/json" \
+  USER_RIGHTS_RESP=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$PARTICIPANT_JSON_API/v2/users/$PARTY_USER/rights" \
     --data-raw "$(jq -n \
       --arg userId "$PARTY_USER" \
       --arg party "$PARTY_ID" \
@@ -368,12 +398,31 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
           {kind: {CanActAs: {value: {party: $party}}}},
           {kind: {CanReadAs: {value: {party: $party}}}}
         ]
-      }')" > /dev/null 2>&1 || true
+      }')" 2>/dev/null || echo "")
+  USER_RIGHTS_HTTP=$(echo "$USER_RIGHTS_RESP" | tail -n1 | tr -d '\r')
+  if [ "$USER_RIGHTS_HTTP" != "200" ] && [ "$USER_RIGHTS_HTTP" != "201" ] && [ "$USER_RIGHTS_HTTP" != "204" ]; then
+    USER_RIGHTS_BODY=$(echo "$USER_RIGHTS_RESP" | sed '$d')
+    log "  WARNING: Failed to grant user $PARTY_USER rights (HTTP $USER_RIGHTS_HTTP)"
+    log "    Response: $(echo "$USER_RIGHTS_BODY" | head -c 200)"
+    _party_ok=false
+  fi
 
-  log "  [$((i+1))/$TOTAL_PARTIES] User $PARTY_USER created with rights"
+  if [ "$_party_ok" = true ]; then
+    log "  [$((i+1))/$TOTAL_PARTIES] User $PARTY_USER created with rights"
+  else
+    log "  [$((i+1))/$TOTAL_PARTIES] User $PARTY_USER completed with warnings (see above)"
+    STEP2_WARNINGS=$((STEP2_WARNINGS + 1))
+  fi
 done
 
-log "  All $TOTAL_PARTIES users created."
+if [ $STEP2_WARNINGS -gt 0 ]; then
+  log ""
+  log "  WARNING: $STEP2_WARNINGS/$TOTAL_PARTIES parties had issues in Step 2."
+  log "  The script will continue, but some users may lack rights."
+  log "  Re-run with ONBOARD_ONLY=true to retry user creation and rights grants."
+else
+  log "  All $TOTAL_PARTIES users created."
+fi
 
 ##############################################################################
 # Done
@@ -392,6 +441,9 @@ else
   log "  New parties allocated: $NUM_PARTIES"
 fi
 log "  Total parties in file: $TOTAL_PARTIES"
+if [ "${STEP2_WARNINGS:-0}" -gt 0 ]; then
+  log "  Step 2 warnings: $STEP2_WARNINGS (re-run with ONBOARD_ONLY=true to retry)"
+fi
 log "  Participant: $PARTICIPANT_JSON_API"
 log "  Namespace: ${NAMESPACE:0:40}..."
 log "  Output file: $PARTIES_FILE"
