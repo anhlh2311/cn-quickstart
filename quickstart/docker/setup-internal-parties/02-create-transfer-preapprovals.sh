@@ -68,37 +68,6 @@ log_error() {
   echo "[transfer-preapproval] ERROR: $*" >&2
 }
 
-curl_check() {
-  local url=$1
-  local token=$2
-  local content_type=${3:-application/json}
-  shift 3
-  local args=("$@")
-
-  local curl_args=(-s -S -w "\n%{http_code}" "$url")
-  if [ -n "$token" ]; then
-    curl_args+=(-H "Authorization: Bearer $token")
-  fi
-  curl_args+=(-H "Content-Type: $content_type")
-  curl_args+=("${args[@]}")
-
-  local response
-  response=$(curl "${curl_args[@]}")
-
-  local http_code
-  http_code=$(echo "$response" | tail -n1 | tr -d '\r')
-  local response_body
-  response_body=$(echo "$response" | sed '$d')
-
-  if [ "$http_code" -ne "200" ] && [ "$http_code" -ne "201" ] && [ "$http_code" -ne "204" ]; then
-    log_error "Request to $url failed with HTTP $http_code"
-    log_error "Response: $response_body"
-    return 1
-  fi
-
-  echo "$response_body"
-}
-
 ##############################################################################
 # Pre-flight checks
 ##############################################################################
@@ -126,31 +95,61 @@ VALIDATOR_TOKEN=$(get_validator_token)
 
 # Resolve the validator (provider) party — the primary party of the admin user
 ADMIN_USER="${ADMIN_USER:-${SHARED_SECRET_USER:-ledger-api-user}}"
-PROVIDER_PARTY=$(curl_check "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER" "$TOKEN" "application/json" \
-  | jq -r '.user.primaryParty // empty')
+PROVIDER_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER" 2>/dev/null || echo "")
+PROVIDER_HTTP=$(echo "$PROVIDER_RESP" | tail -n1 | tr -d '\r')
+PROVIDER_BODY=$(echo "$PROVIDER_RESP" | sed '$d')
 
+if [ "$PROVIDER_HTTP" != "200" ]; then
+  log_error "Could not resolve provider party from user $ADMIN_USER (HTTP $PROVIDER_HTTP)"
+  log_error "Response: $(echo "$PROVIDER_BODY" | head -c 300)"
+  exit 1
+fi
+PROVIDER_PARTY=$(echo "$PROVIDER_BODY" | jq -r '.user.primaryParty // empty')
 if [ -z "$PROVIDER_PARTY" ]; then
-  log_error "Could not resolve provider (validator) party from user $ADMIN_USER"
+  log_error "User $ADMIN_USER has no primaryParty set"
   exit 1
 fi
 log "  Provider (validator) party: ${PROVIDER_PARTY:0:50}..."
 
 # Resolve DSO party from validator API
-DSO_PARTY=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$VALIDATOR_TOKEN" "application/json" \
-  | jq -r '.dso_party_id // empty')
+DSO_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $VALIDATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" 2>/dev/null || echo "")
+DSO_HTTP=$(echo "$DSO_RESP" | tail -n1 | tr -d '\r')
+DSO_BODY=$(echo "$DSO_RESP" | sed '$d')
 
+if [ "$DSO_HTTP" != "200" ]; then
+  log_error "Could not resolve DSO party from validator API (HTTP $DSO_HTTP)"
+  log_error "Response: $(echo "$DSO_BODY" | head -c 300)"
+  exit 1
+fi
+DSO_PARTY=$(echo "$DSO_BODY" | jq -r '.dso_party_id // empty')
 if [ -z "$DSO_PARTY" ]; then
-  log_error "Could not resolve DSO party from validator API"
+  log_error "DSO party ID not found in validator response"
   exit 1
 fi
 log "  DSO party: ${DSO_PARTY:0:50}..."
 
 # Get synchronizer ID
-SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$TOKEN" "application/json" \
-  | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
+SYNC_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" 2>/dev/null || echo "")
+SYNC_HTTP=$(echo "$SYNC_RESP" | tail -n1 | tr -d '\r')
+SYNC_BODY=$(echo "$SYNC_RESP" | sed '$d')
 
+if [ "$SYNC_HTTP" != "200" ]; then
+  log_error "Could not get connected synchronizers (HTTP $SYNC_HTTP)"
+  log_error "Response: $(echo "$SYNC_BODY" | head -c 300)"
+  exit 1
+fi
+SYNCHRONIZER_ID=$(echo "$SYNC_BODY" | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 if [ -z "$SYNCHRONIZER_ID" ]; then
-  log_error "Could not get connected synchronizer"
+  log_error "No connected synchronizers found"
   exit 1
 fi
 log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
@@ -197,7 +196,7 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
     # Ensure admin user has ActAs/ReadAs rights for this party (idempotent).
     # In OAuth2 mode, get_user_token returns the admin token, so the admin user
     # needs CanActAs to submit commands with actAs: [party].
-    curl -s -o /dev/null \
+    RIGHTS_RESP=$(curl -s -w "\n%{http_code}" \
       -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
       "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER/rights" \
@@ -211,7 +210,14 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
             {kind: {CanActAs: {value: {party: $party}}}},
             {kind: {CanReadAs: {value: {party: $party}}}}
           ]
-        }')" 2>/dev/null || true
+        }')" 2>/dev/null || echo "")
+    RIGHTS_HTTP=$(echo "$RIGHTS_RESP" | tail -n1 | tr -d '\r')
+    if [ "$RIGHTS_HTTP" != "200" ] && [ "$RIGHTS_HTTP" != "201" ] && [ "$RIGHTS_HTTP" != "204" ]; then
+      RIGHTS_BODY=$(echo "$RIGHTS_RESP" | sed '$d')
+      log "  WARNING: Failed to grant admin ($ADMIN_USER) rights for $PARTY_HINT (HTTP $RIGHTS_HTTP)"
+      log "    Response: $(echo "$RIGHTS_BODY" | head -c 200)"
+      log "    Proposal submission may fail with 403. Continuing anyway..."
+    fi
 
     # Get a token to submit as the receiver party
     USER_TOKEN=$(get_user_token "$USER_ID")
@@ -250,19 +256,30 @@ for i in $(seq 0 $((TOTAL_PARTIES - 1))); do
         }
       }')
 
-    SUBMIT_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
-      "$USER_TOKEN" "application/json" --data-raw "$PROPOSAL_BODY") || {
-      log_error "Failed to create TransferPreapprovalProposal for $PARTY_HINT"
-      exit 1
-    }
+    SUBMIT_RESP=$(curl -s -w "\n%{http_code}" \
+      -H "Authorization: Bearer $USER_TOKEN" \
+      -H "Content-Type: application/json" \
+      "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
+      --data-raw "$PROPOSAL_BODY" 2>/dev/null || echo "")
+    SUBMIT_HTTP=$(echo "$SUBMIT_RESP" | tail -n1 | tr -d '\r')
+    SUBMIT_BODY=$(echo "$SUBMIT_RESP" | sed '$d')
 
-    PROPOSAL_CID=$(echo "$SUBMIT_RESULT" | jq -r '
+    if [ "$SUBMIT_HTTP" != "200" ] && [ "$SUBMIT_HTTP" != "201" ]; then
+      log_error "Failed to create TransferPreapprovalProposal for $PARTY_HINT (HTTP $SUBMIT_HTTP)"
+      log_error "Response: $(echo "$SUBMIT_BODY" | head -c 500)"
+      SKIPPED=$((${SKIPPED:-0} + 1))
+      continue
+    fi
+
+    PROPOSAL_CID=$(echo "$SUBMIT_BODY" | jq -r '
       [.transaction.events[] | select(.CreatedEvent) | .CreatedEvent.contractId][0] // empty
     ')
 
     if [ -z "$PROPOSAL_CID" ]; then
       log_error "No contract ID in proposal creation response for $PARTY_HINT"
-      exit 1
+      log_error "Response: $(echo "$SUBMIT_BODY" | head -c 300)"
+      SKIPPED=$((${SKIPPED:-0} + 1))
+      continue
     fi
 
     log "  [$((i+1))/$TOTAL_PARTIES] $PARTY_HINT: proposal created: ${PROPOSAL_CID:0:40}..."
