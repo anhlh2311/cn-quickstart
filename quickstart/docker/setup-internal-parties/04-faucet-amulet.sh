@@ -78,31 +78,6 @@ AMULET_RULES_TEMPLATE="#splice-amulet:Splice.AmuletRules:AmuletRules"
 log() { echo "[faucet-amulet] $*"; }
 log_error() { echo "[faucet-amulet] ERROR: $*" >&2; }
 
-curl_check() {
-  local url=$1 token=$2 content_type=${3:-application/json}
-  shift 3
-  local curl_args=(-s -S -w "\n%{http_code}" "$url")
-  if [ -n "$token" ]; then
-    curl_args+=(-H "Authorization: Bearer $token")
-  fi
-  curl_args+=(-H "Content-Type: $content_type")
-  curl_args+=("$@")
-
-  local response
-  response=$(curl "${curl_args[@]}")
-
-  local http_code body
-  http_code=$(echo "$response" | tail -n1 | tr -d '\r')
-  body=$(echo "$response" | sed '$d')
-
-  if [ "$http_code" -ne "200" ] && [ "$http_code" -ne "201" ] && [ "$http_code" -ne "204" ]; then
-    log_error "Request to $url failed with HTTP $http_code"
-    log_error "Response: $body"
-    return 1
-  fi
-  echo "$body"
-}
-
 ##############################################################################
 # Pre-flight checks
 ##############################################################################
@@ -131,13 +106,19 @@ VALIDATOR_TOKEN=$(get_validator_token)
 
 log "Step 1: Fetching AmuletRules + OpenMiningRound via scan-proxy..."
 
-SCAN_RESPONSE=$(curl_check \
+SCAN_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $VALIDATOR_TOKEN" \
+  -H "Content-Type: application/json" \
   "$VALIDATOR_API/api/validator/v0/scan-proxy/registry/allocation-instruction/v1/allocation-factory" \
-  "$VALIDATOR_TOKEN" "application/json" \
-  --data-raw '{"choiceArguments":{},"excludeDebugFields":true}') || {
-  log_error "Failed to fetch Amulet factory from scan-proxy. Is the validator running?"
+  --data-raw '{"choiceArguments":{},"excludeDebugFields":true}' 2>/dev/null || echo "")
+SCAN_HTTP=$(echo "$SCAN_RESP" | tail -n1 | tr -d '\r')
+SCAN_RESPONSE=$(echo "$SCAN_RESP" | sed '$d')
+
+if [ "$SCAN_HTTP" != "200" ]; then
+  log_error "Failed to fetch Amulet factory from scan-proxy (HTTP $SCAN_HTTP). Is the validator running?"
+  log_error "Response: $(echo "$SCAN_RESPONSE" | head -c 300)"
   exit 1
-}
+fi
 
 # AmuletRules CID from choiceContext.choiceContextData["amulet-rules"]
 AMULET_RULES_CID=$(echo "$SCAN_RESPONSE" | jq -r '
@@ -220,11 +201,20 @@ for i in $(seq 0 $((NUM_TRANSFERS - 1))); do
       }
     }')
 
-  TX_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
-    "$USER_TOKEN" "application/json" --data-raw "$SUBMIT_BODY") || {
-    log_error "Failed to tap Amulet for $USER_ID ($RECIPIENT)"
-    exit 1
-  }
+  TX_RESP=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $USER_TOKEN" \
+    -H "Content-Type: application/json" \
+    "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
+    --data-raw "$SUBMIT_BODY" 2>/dev/null || echo "")
+  TX_HTTP=$(echo "$TX_RESP" | tail -n1 | tr -d '\r')
+  TX_RESULT=$(echo "$TX_RESP" | sed '$d')
+
+  if [ "$TX_HTTP" != "200" ] && [ "$TX_HTTP" != "201" ]; then
+    log_error "Failed to tap Amulet for $USER_ID (HTTP $TX_HTTP)"
+    log_error "Response: $(echo "$TX_RESULT" | head -c 500)"
+    SKIPPED=$((${SKIPPED:-0} + 1))
+    continue
+  fi
 
   AMULET_CID=$(echo "$TX_RESULT" | jq -r '
     [.transaction.events[] | (.CreatedEvent // .created // empty)
@@ -247,14 +237,19 @@ for i in $(seq 0 $((NUM_TRANSFERS - 1))); do
   if [ -z "$AMULET_CID" ]; then
     log_error "Could not extract Amulet CID for $USER_ID"
     log_error "Events: $(echo "$TX_RESULT" | jq -c '[.transaction.events[] | (.CreatedEvent // .created // empty) | .templateId]' 2>/dev/null | head -c 300)"
-    exit 1
+    SKIPPED=$((${SKIPPED:-0} + 1))
+    continue
   fi
 
   log "    Amulet CID: ${AMULET_CID:0:40}..."
   RESULTS+=("${RECIPIENT}|${USER_ID}|${AMOUNT}|${AMULET_CID}")
 done
 
-log "  All $NUM_TRANSFERS taps succeeded"
+if [ "${SKIPPED:-0}" -gt 0 ]; then
+  log "  WARNING: $SKIPPED/$NUM_TRANSFERS taps failed (see errors above)"
+else
+  log "  All $NUM_TRANSFERS taps succeeded"
+fi
 
 ##############################################################################
 # Step 3: Write results to fauceted-amulet.json
@@ -298,8 +293,12 @@ log "=========================================="
 log "Amulet Faucet Complete!"
 log "=========================================="
 log ""
+SUCCEEDED=${#RESULTS[@]}
 log "Summary:"
-log "  Recipients:     $NUM_TRANSFERS"
+log "  Recipients:     $SUCCEEDED / $NUM_TRANSFERS"
+if [ "${SKIPPED:-0}" -gt 0 ]; then
+  log "  Skipped (errors): $SKIPPED — re-run the script to retry"
+fi
 log "  Total CC:       $GRAND_TOTAL"
 log "  Output:         $OUTPUT_FILE"
 log ""

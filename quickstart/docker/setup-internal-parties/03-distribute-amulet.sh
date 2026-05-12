@@ -82,37 +82,6 @@ log_error() {
   echo "[distribute-amulet] ERROR: $*" >&2
 }
 
-curl_check() {
-  local url=$1
-  local token=$2
-  local content_type=${3:-application/json}
-  shift 3
-  local args=("$@")
-
-  local curl_args=(-s -S -w "\n%{http_code}" "$url")
-  if [ -n "$token" ]; then
-    curl_args+=(-H "Authorization: Bearer $token")
-  fi
-  curl_args+=(-H "Content-Type: $content_type")
-  curl_args+=("${args[@]}")
-
-  local response
-  response=$(curl "${curl_args[@]}")
-
-  local http_code
-  http_code=$(echo "$response" | tail -n1 | tr -d '\r')
-  local response_body
-  response_body=$(echo "$response" | sed '$d')
-
-  if [ "$http_code" -ne "200" ] && [ "$http_code" -ne "201" ] && [ "$http_code" -ne "204" ]; then
-    log_error "Request to $url failed with HTTP $http_code"
-    log_error "Response: $response_body"
-    return 1
-  fi
-
-  echo "$response_body"
-}
-
 # Query active contracts with includeCreatedEventBlob
 query_active_contracts() {
   local json_api=$1
@@ -121,8 +90,20 @@ query_active_contracts() {
   local template_id=$4
   local verbose=${5:-false}
 
+  local offset_resp
+  offset_resp=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    "$json_api/v2/state/ledger-end" 2>/dev/null || echo "")
+  local offset_http
+  offset_http=$(echo "$offset_resp" | tail -n1 | tr -d '\r')
+  if [ "$offset_http" != "200" ]; then
+    log_error "Failed to get ledger end (HTTP $offset_http)"
+    echo ""
+    return
+  fi
   local offset
-  offset=$(curl_check "$json_api/v2/state/ledger-end" "$token" "application/json" | jq -r '.offset')
+  offset=$(echo "$offset_resp" | sed '$d' | jq -r '.offset')
 
   local query_body
   query_body=$(jq -n \
@@ -151,8 +132,20 @@ query_active_contracts() {
       activeAtOffset: $offset
     }')
 
-  curl_check "$json_api/v2/state/active-contracts" "$token" "application/json" \
-    --data-raw "$query_body" 2>/dev/null || echo ""
+  local acs_resp
+  acs_resp=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    "$json_api/v2/state/active-contracts" \
+    --data-raw "$query_body" 2>/dev/null || echo "")
+  local acs_http
+  acs_http=$(echo "$acs_resp" | tail -n1 | tr -d '\r')
+  if [ "$acs_http" != "200" ]; then
+    log_error "Failed to query active contracts (HTTP $acs_http)"
+    echo ""
+    return
+  fi
+  echo "$acs_resp" | sed '$d'
 }
 
 ##############################################################################
@@ -192,31 +185,61 @@ VALIDATOR_TOKEN=$(get_validator_token)
 
 # Resolve sender party (participant's validator party)
 ADMIN_USER="${ADMIN_USER:-${SHARED_SECRET_USER:-ledger-api-user}}"
-SENDER_PARTY=$(curl_check "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER" "$TOKEN" "application/json" \
-  | jq -r '.user.primaryParty // empty')
+SENDER_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$PARTICIPANT_JSON_API/v2/users/$ADMIN_USER" 2>/dev/null || echo "")
+SENDER_HTTP=$(echo "$SENDER_RESP" | tail -n1 | tr -d '\r')
+SENDER_BODY=$(echo "$SENDER_RESP" | sed '$d')
 
+if [ "$SENDER_HTTP" != "200" ]; then
+  log_error "Could not resolve sender party from user $ADMIN_USER (HTTP $SENDER_HTTP)"
+  log_error "Response: $(echo "$SENDER_BODY" | head -c 300)"
+  exit 1
+fi
+SENDER_PARTY=$(echo "$SENDER_BODY" | jq -r '.user.primaryParty // empty')
 if [ -z "$SENDER_PARTY" ]; then
-  log_error "Could not resolve sender party from user $ADMIN_USER"
+  log_error "User $ADMIN_USER has no primaryParty set"
   exit 1
 fi
 log "  Sender: ${SENDER_PARTY:0:50}..."
 
 # Resolve DSO party
-DSO_PARTY=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" "$VALIDATOR_TOKEN" "application/json" \
-  | jq -r '.dso_party_id // empty')
+DSO_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $VALIDATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$VALIDATOR_API/api/validator/v0/scan-proxy/dso-party-id" 2>/dev/null || echo "")
+DSO_HTTP=$(echo "$DSO_RESP" | tail -n1 | tr -d '\r')
+DSO_BODY=$(echo "$DSO_RESP" | sed '$d')
 
+if [ "$DSO_HTTP" != "200" ]; then
+  log_error "Could not resolve DSO party (HTTP $DSO_HTTP)"
+  log_error "Response: $(echo "$DSO_BODY" | head -c 300)"
+  exit 1
+fi
+DSO_PARTY=$(echo "$DSO_BODY" | jq -r '.dso_party_id // empty')
 if [ -z "$DSO_PARTY" ]; then
-  log_error "Could not resolve DSO party"
+  log_error "DSO party ID not found in validator response"
   exit 1
 fi
 log "  DSO: ${DSO_PARTY:0:50}..."
 
 # Get synchronizer ID
-SYNCHRONIZER_ID=$(curl_check "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" "$TOKEN" "application/json" \
-  | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
+SYNC_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$PARTICIPANT_JSON_API/v2/state/connected-synchronizers" 2>/dev/null || echo "")
+SYNC_HTTP=$(echo "$SYNC_RESP" | tail -n1 | tr -d '\r')
+SYNC_BODY=$(echo "$SYNC_RESP" | sed '$d')
 
+if [ "$SYNC_HTTP" != "200" ]; then
+  log_error "Could not get connected synchronizers (HTTP $SYNC_HTTP)"
+  log_error "Response: $(echo "$SYNC_BODY" | head -c 300)"
+  exit 1
+fi
+SYNCHRONIZER_ID=$(echo "$SYNC_BODY" | jq -r '.connectedSynchronizers[0].synchronizerId // empty')
 if [ -z "$SYNCHRONIZER_ID" ]; then
-  log_error "Could not get connected synchronizer"
+  log_error "No connected synchronizers found"
   exit 1
 fi
 log "  Synchronizer: ${SYNCHRONIZER_ID:0:40}..."
@@ -244,7 +267,18 @@ log ""
 log "Step 1: Fetching AmuletRules + OpenMiningRound from scan-proxy..."
 
 # Fetch AmuletRules via scan-proxy on the validator API
-AMULET_RULES_RESPONSE=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/amulet-rules" "$VALIDATOR_TOKEN" "application/json")
+AR_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $VALIDATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$VALIDATOR_API/api/validator/v0/scan-proxy/amulet-rules" 2>/dev/null || echo "")
+AR_HTTP=$(echo "$AR_RESP" | tail -n1 | tr -d '\r')
+AMULET_RULES_RESPONSE=$(echo "$AR_RESP" | sed '$d')
+
+if [ "$AR_HTTP" != "200" ]; then
+  log_error "Could not fetch AmuletRules from scan-proxy (HTTP $AR_HTTP)"
+  log_error "Response: $(echo "$AMULET_RULES_RESPONSE" | head -c 300)"
+  exit 1
+fi
 
 # Response format: { amulet_rules: { contract: { contract_id, template_id, created_event_blob, payload } } }
 AMULET_RULES_CID=$(echo "$AMULET_RULES_RESPONSE" | jq -r '
@@ -265,7 +299,18 @@ fi
 log "  AmuletRules: ${AMULET_RULES_CID:0:40}..."
 
 # Fetch OpenMiningRound via scan-proxy on the validator API
-OPEN_ROUNDS_RESPONSE=$(curl_check "$VALIDATOR_API/api/validator/v0/scan-proxy/open-and-issuing-mining-rounds" "$VALIDATOR_TOKEN" "application/json")
+OR_RESP=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $VALIDATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$VALIDATOR_API/api/validator/v0/scan-proxy/open-and-issuing-mining-rounds" 2>/dev/null || echo "")
+OR_HTTP=$(echo "$OR_RESP" | tail -n1 | tr -d '\r')
+OPEN_ROUNDS_RESPONSE=$(echo "$OR_RESP" | sed '$d')
+
+if [ "$OR_HTTP" != "200" ]; then
+  log_error "Could not fetch OpenMiningRound from scan-proxy (HTTP $OR_HTTP)"
+  log_error "Response: $(echo "$OPEN_ROUNDS_RESPONSE" | head -c 300)"
+  exit 1
+fi
 
 # Response format: { open_mining_rounds: [{ contract: { contract_id, template_id, created_event_blob, payload } }] }
 # Pick the lowest (earliest/already-open) round
@@ -450,11 +495,20 @@ for i in $(seq 0 $((TOTAL_TRANSFERS - 1))); do
       }
     }')
 
-  TX_RESULT=$(curl_check "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
-    "$TOKEN" "application/json" --data-raw "$SUBMIT_BODY") || {
-    log_error "Failed to transfer $AMOUNT CC to $RECIPIENT_SHORT (transfer #$((i+1)))"
-    exit 1
-  }
+  TX_RESP=$(curl -s -w "\n%{http_code}" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$PARTICIPANT_JSON_API/v2/commands/submit-and-wait-for-transaction" \
+    --data-raw "$SUBMIT_BODY" 2>/dev/null || echo "")
+  TX_HTTP=$(echo "$TX_RESP" | tail -n1 | tr -d '\r')
+  TX_RESULT=$(echo "$TX_RESP" | sed '$d')
+
+  if [ "$TX_HTTP" != "200" ] && [ "$TX_HTTP" != "201" ]; then
+    log_error "Failed to transfer $AMOUNT CC to $RECIPIENT_SHORT (transfer #$((i+1)), HTTP $TX_HTTP)"
+    log_error "Response: $(echo "$TX_RESULT" | head -c 500)"
+    SKIPPED=$((${SKIPPED:-0} + 1))
+    continue
+  fi
 
   # Extract all created Amulet contracts from the transaction
   # submit-and-wait-for-transaction returns verbose format: createArguments (not createArgument)
@@ -472,7 +526,8 @@ for i in $(seq 0 $((TOTAL_TRANSFERS - 1))); do
   if [ "$NUM_CREATED" -eq 0 ]; then
     log_error "No Amulet contracts created in transfer #$((i+1))"
     log_error "Response events: $(echo "$TX_RESULT" | jq -c '[.transaction.events[] | keys]' 2>/dev/null | head -c 500)"
-    exit 1
+    SKIPPED=$((${SKIPPED:-0} + 1))
+    continue
   fi
 
   # Identify receiver's Amulet vs sender's change Amulet
@@ -494,8 +549,8 @@ for i in $(seq 0 $((TOTAL_TRANSFERS - 1))); do
     fi
     if [ -z "$RECEIVER_AMULET_CID" ]; then
       log_error "Could not identify receiver's Amulet from transfer #$((i+1))"
-      rm -f "$HOLDINGS_TRACKER"
-      exit 1
+      SKIPPED=$((${SKIPPED:-0} + 1))
+      continue
     fi
 
     # Change is the other Amulet (owned by sender)
@@ -544,8 +599,12 @@ log "=========================================="
 log "Amulet Distribution Complete!"
 log "=========================================="
 log ""
+COMPLETED=$(jq '.transfers | length' "$OUTPUT_FILE")
 log "Summary:"
-log "  Transfers completed: $TOTAL_TRANSFERS"
+log "  Transfers completed: $COMPLETED / $TOTAL_TRANSFERS"
+if [ "${SKIPPED:-0}" -gt 0 ]; then
+  log "  Skipped (errors): $SKIPPED — re-run the script to retry failed transfers"
+fi
 log "  Total distributed: $(jq '[.transfers[].amount | tonumber] | add // 0' "$OUTPUT_FILE") CC"
 log "  Output file: $OUTPUT_FILE"
 log ""
